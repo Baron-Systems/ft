@@ -18,6 +18,9 @@ class TranslationEntry:
     context: TranslationContext
     source_file: Optional[str] = None
     line_number: int = 0
+    confidence: float = 0.95  # Confidence score (0.0-1.0)
+    review_status: str = "approved"  # "approved", "needs_review", "rejected"
+    needs_review: bool = False  # Flag for translations needing review
 
 
 class TranslationStorage:
@@ -119,6 +122,19 @@ class TranslationStorage:
                 return entry.translated_text
         
         return None
+    
+    def get_entry_by_source(self, source_text: str) -> Optional[TranslationEntry]:
+        """
+        Get translation entry by source text.
+        
+        Args:
+            source_text: Source text
+            
+        Returns:
+            TranslationEntry or None
+        """
+        key = self._make_key(source_text, "")
+        return self._cache.get(key)
 
     def set(
         self,

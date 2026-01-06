@@ -75,7 +75,7 @@ class Translator:
 
         # Create minimal context for policy check
         policy_context = TranslationContext(layer="A")
-        decision = self.policy.decide(text, policy_context)
+        decision, reason = self.policy.decide(text, policy_context)
 
         if decision.value == "skip":
             self.stats["skipped"] += 1
@@ -182,32 +182,129 @@ class Translator:
         texts: List[str],
         target_lang: str,
         source_lang: str = "en",
-        batch_size: int = 10,
+        batch_size: int = 30,
+        context: Optional[str] = None,
     ) -> List[Tuple[Optional[str], str]]:
         """
-        Translate a batch of texts.
+        Translate a batch of texts using true batching.
 
         Args:
             texts: List of texts to translate
             target_lang: Target language code
             source_lang: Source language code
-            batch_size: Batch size for API calls
+            batch_size: Batch size for API calls (20-50 recommended)
+            context: Optional context for translation
 
         Returns:
             List of (translated_text, status) tuples
         """
+        if not texts:
+            return []
+        
+        # Clamp batch size to reasonable range
+        batch_size = max(10, min(50, batch_size))
+        
         results = []
+        
+        # Process in batches
         for i in range(0, len(texts), batch_size):
             batch = texts[i : i + batch_size]
-            for text in batch:
-                result = self.translate(text, target_lang, source_lang)
-                results.append(result)
-
+            
+            # Try batch translation first
+            batch_results = self._translate_batch_internal(
+                batch, target_lang, source_lang, context
+            )
+            
+            # If batch translation failed, fallback to individual
+            if batch_results is None:
+                # Fallback to individual translation
+                for text in batch:
+                    result = self.translate(text, target_lang, source_lang, context)
+                    results.append(result)
+                    
+                    # Rate limiting in slow mode
+                    if self.slow_mode:
+                        time.sleep(0.3)
+            else:
+                results.extend(batch_results)
+                
                 # Rate limiting in slow mode
                 if self.slow_mode:
                     time.sleep(0.5)
-
+        
         return results
+    
+    def _translate_batch_internal(
+        self,
+        texts: List[str],
+        target_lang: str,
+        source_lang: str,
+        context: Optional[str],
+    ) -> Optional[List[Tuple[Optional[str], str]]]:
+        """
+        Internal batch translation using single API call.
+        
+        Returns None if batch translation fails (should fallback to individual).
+        """
+        try:
+            # Build batch prompt
+            prompt = self._build_batch_prompt(texts, target_lang, source_lang, context)
+            
+            # Try models in order
+            last_error = None
+            for model_index in range(self.current_model_index, len(self.models)):
+                model = self.models[model_index]
+                try:
+                    # Call Groq API
+                    response = self.client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": "You are a professional translator. Return translations in JSON format or newline-separated format. Preserve all placeholders exactly.",
+                            },
+                            {"role": "user", "content": prompt},
+                        ],
+                        temperature=0.2,
+                        max_tokens=2000,  # More tokens for batch
+                    )
+                    
+                    translated_text = response.choices[0].message.content.strip()
+                    
+                    # Parse batch response
+                    parsed_results = self._parse_batch_response(
+                        translated_text, texts, target_lang
+                    )
+                    
+                    if parsed_results:
+                        # Success - update model index
+                        self.current_model_index = model_index
+                        return parsed_results
+                    
+                except Exception as e:
+                    last_error = e
+                    error_str = str(e)
+                    
+                    # Check if model is decommissioned or invalid
+                    if "decommissioned" in error_str.lower() or "invalid" in error_str.lower() or "not found" in error_str.lower():
+                        if model_index < len(self.models) - 1:
+                            self.output.warning(f"Model {model} not available, trying next model...", verbose_only=True)
+                            continue
+                    
+                    # If it's a different error and we haven't tried all models, try next
+                    if model_index < len(self.models) - 1:
+                        self.output.warning(f"Error with model {model}, trying next model...", verbose_only=True)
+                        continue
+                    
+                    break
+            
+            # All models failed
+            return None
+            
+        except Exception as e:
+            # Batch translation failed, return None to trigger fallback
+            self.output.warning(f"Batch translation failed: {e}, falling back to individual translation", verbose_only=True)
+            return None
 
     def _build_prompt(
         self,
@@ -216,7 +313,7 @@ class Translator:
         source_lang: str,
         context: Optional[str],
     ) -> str:
-        """Build translation prompt."""
+        """Build translation prompt for single text."""
         # Build context-aware prompt
         context_part = ""
         if context:
@@ -235,6 +332,113 @@ Text: {text}
 
 Translation:"""
         return prompt
+    
+    def _build_batch_prompt(
+        self,
+        texts: List[str],
+        target_lang: str,
+        source_lang: str,
+        context: Optional[str],
+    ) -> str:
+        """Build batch translation prompt."""
+        # Build context-aware prompt
+        context_part = ""
+        if context:
+            context_part = f"\nContext: These texts are from a {context}. Translate according to the meaning and context, not literally."
+        
+        # Number each text for reference
+        numbered_texts = []
+        for i, text in enumerate(texts, 1):
+            numbered_texts.append(f"{i}. {text}")
+        
+        texts_block = "\n".join(numbered_texts)
+        
+        prompt = f"""Translate the following {len(texts)} texts from {source_lang} to {target_lang}.{context_part}
+
+Rules:
+- Preserve ALL placeholders exactly as they appear (e.g., {{0}}, {{1}}, %(name)s, {{{{ var }}}})
+- Keep the same formatting and structure
+- Do NOT translate technical terms, code, URLs, or email addresses
+- Translate according to meaning and context, not word-by-word
+- Return translations in the same order, one per line, or as JSON array
+
+Texts:
+{texts_block}
+
+Translations (one per line or JSON array):"""
+        return prompt
+    
+    def _parse_batch_response(
+        self,
+        response: str,
+        original_texts: List[str],
+        target_lang: str,
+    ) -> Optional[List[Tuple[Optional[str], str]]]:
+        """
+        Parse batch translation response.
+        
+        Supports:
+        - JSON array format: ["trans1", "trans2", ...]
+        - Newline-separated format
+        - Numbered format: "1. trans1\n2. trans2\n..."
+        """
+        if not response:
+            return None
+        
+        results = []
+        
+        # Try JSON format first
+        import json
+        try:
+            # Try to parse as JSON
+            if response.strip().startswith('['):
+                parsed = json.loads(response)
+                if isinstance(parsed, list) and len(parsed) == len(original_texts):
+                    for i, trans in enumerate(parsed):
+                        if isinstance(trans, str):
+                            # Validate placeholders
+                            if self.policy.validate_placeholders(original_texts[i], trans):
+                                results.append((trans, "ok"))
+                                self.stats["translated"] += 1
+                            else:
+                                results.append((None, "rejected"))
+                                self.stats["rejected"] += 1
+                        else:
+                            results.append((None, "failed"))
+                            self.stats["failed"] += 1
+                    return results
+        except (json.JSONDecodeError, ValueError):
+            pass
+        
+        # Try newline-separated format
+        lines = [line.strip() for line in response.split('\n') if line.strip()]
+        
+        # Filter out instruction lines
+        filtered_lines = []
+        for line in lines:
+            # Skip lines that look like instructions
+            if any(keyword in line.lower() for keyword in ['important:', 'rules:', 'preserve', 'do not', 'return', 'translation:', 'translations:']):
+                continue
+            # Skip numbered prefixes if present
+            if line and line[0].isdigit() and '. ' in line[:5]:
+                line = line.split('. ', 1)[1] if '. ' in line else line
+            filtered_lines.append(line)
+        
+        # Match lines to original texts
+        if len(filtered_lines) >= len(original_texts):
+            # Take first N lines
+            for i, trans in enumerate(filtered_lines[:len(original_texts)]):
+                # Validate placeholders
+                if self.policy.validate_placeholders(original_texts[i], trans):
+                    results.append((trans, "ok"))
+                    self.stats["translated"] += 1
+                else:
+                    results.append((None, "rejected"))
+                    self.stats["rejected"] += 1
+            return results
+        
+        # If we don't have enough translations, return None to trigger fallback
+        return None
 
     def get_stats(self) -> dict:
         """Get translation statistics."""

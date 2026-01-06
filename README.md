@@ -38,62 +38,80 @@ See [INSTALLATION_FM.md](INSTALLATION_FM.md) for detailed instructions.
 
 ## Usage
 
-### Basic Usage
+**See [USAGE.md](USAGE.md) for comprehensive usage guide.**
 
-Translate a specific app:
+### Quick Start
 
 ```bash
+# 1. Set API key
 export GROQ_API_KEY="your-api-key-here"
-ai-translate --apps frappe --lang es --site your-site-name
+
+# 2. List available benches
+ai-translate list-benches
+
+# 3. Translate an app
+ai-translate translate erpnext --lang ar --site your-site-name
+
+# 4. Review translations
+ai-translate review erpnext --lang ar
+
+# 5. Audit translations
+ai-translate audit erpnext --lang ar
 ```
 
-### Process All Apps
+### Basic Commands
+
+#### Translate
 
 ```bash
-ai-translate --all-apps --lang fr --site your-site-name
+# Basic translation
+ai-translate translate erpnext --lang ar --site mysite
+
+# With database content
+ai-translate translate erpnext --lang ar --site mysite --db-scope
+
+# Database content only
+ai-translate translate erpnext --lang ar --site mysite --db-scope-only
+
+# Specific DocTypes
+ai-translate translate erpnext --lang ar --site mysite --db-scope --db-doc-types "Workspace,Report"
 ```
 
-### Process Specific Layers
+#### Review
 
 ```bash
-# Layer A only (Code & Files)
-ai-translate --apps frappe --lang de --layers A
+# Review all translations
+ai-translate review erpnext --lang ar
 
-# Layers B & C (Database)
-ai-translate --apps frappe --lang es --site your-site-name --layers B,C
+# Review with context
+ai-translate review erpnext --lang ar --context "ERP System"
 ```
 
-### Dry Run
-
-Preview what would be translated without making changes:
+#### Audit
 
 ```bash
-ai-translate --apps frappe --lang es --site your-site-name --dry-run
+# Audit translations
+ai-translate audit erpnext --lang ar
 ```
 
-### Fix Missing Translations
+#### List Benches
 
 ```bash
-ai-translate --apps frappe --lang es --site your-site-name --fix-missing
+# List all available benches
+ai-translate list-benches
 ```
 
-### Update Existing Translations
+### Options
 
-```bash
-ai-translate --apps frappe --lang es --site your-site-name --update-existing
-```
-
-### Slow Mode (Rate Limiting)
-
-```bash
-ai-translate --apps frappe --lang es --site your-site-name --slow-mode
-```
-
-### Verbose Output
-
-```bash
-ai-translate --apps frappe --lang es --site your-site-name --verbose
-```
+- `--lang, -l`: Target language code (required)
+- `--site, -s`: Site name (required for database layers)
+- `--bench-path, -b`: Path to bench directory
+- `--db-scope`: Include database content (Layers B & C)
+- `--db-scope-only`: Only process database content
+- `--db-doc-types`: Comma-separated allowlist of DocTypes
+- `--verbose, -v`: Verbose output
+- `--slow-mode`: Enable rate limiting
+- `--dry-run`: Preview without making changes
 
 ## Architecture
 
@@ -140,48 +158,70 @@ The policy engine makes context-aware decisions:
 
 Translations are stored in:
 
-- CSV: `sites/<site>/translations/<lang>.csv`
-- PO: `sites/<site>/assets/locale/<lang>/LC_MESSAGES/<lang>.po`
-- MO: `sites/<site>/assets/locale/<lang>/LC_MESSAGES/<lang>.mo`
+- **CSV**: `apps/<app>/<app>/translations/<lang>.csv` (Frappe standard)
+- **Language Memory**: `apps/<app>/<app>/translations/<lang>_memory.json`
+- **PO**: `sites/<site>/assets/locale/<lang>/LC_MESSAGES/<lang>.po` (optional)
+- **MO**: `sites/<site>/assets/locale/<lang>/LC_MESSAGES/<lang>.mo` (optional)
 
 ## Database Writes
 
 The tool writes **only** to the Translation DocType. Original records are never modified.
 
-## CLI Options
+## Features
 
-```
---apps              Comma-separated list of app names
---all-apps          Process all apps
---lang              Target language code (required)
---site              Site name (required for Layers B & C)
---layers            Comma-separated layers (A, B, C) [default: A]
---fix-missing       Fix missing translations
---dry-run           Dry run mode (no writes)
---slow-mode         Enable slow mode (rate limiting)
---update-existing   Update existing translations
---verbose           Verbose output
---bench-path        Path to bench directory
-```
+### Language Memory System
+- Automatic terminology extraction
+- Style profile detection
+- Context-aware translation
+- Accumulative memory per language
+
+### Context-Aware Translation
+- Layer A: Code & Files (conservative)
+- Layer B: UI Metadata (user-facing)
+- Layer C: User Content (full translation)
+
+### Safety Features
+- Policy Engine with rejection reasons
+- Placeholder validation
+- Identifier detection
+- Logic-bearing content protection
+
+### Performance
+- Batch translation (20-50 texts per batch)
+- Caching system (disk-based)
+- AST-based extraction (faster, more accurate)
+- Fallback mechanisms
+
+### Audit & Review
+- Comprehensive audit reports
+- Review system with approval/rejection
+- Confidence tracking
+- Needs review flagging
 
 ## Examples
 
-### Translate ERPNext to Spanish
+### Translate ERPNext to Arabic
 
 ```bash
-ai-translate --all-apps --lang es --site production --layers A,B,C
+ai-translate translate erpnext --lang ar --site production
 ```
 
-### Preview French Translation
+### Translate with Database Content
 
 ```bash
-ai-translate --apps erpnext --lang fr --site production --dry-run --verbose
+ai-translate translate erpnext --lang ar --site production --db-scope
 ```
 
-### Fix Missing German Translations
+### Review Translations
 
 ```bash
-ai-translate --apps frappe --lang de --site production --fix-missing
+ai-translate review erpnext --lang ar --context "ERP System"
+```
+
+### Audit Translations
+
+```bash
+ai-translate audit erpnext --lang ar --verbose
 ```
 
 ## Development
@@ -190,18 +230,24 @@ ai-translate --apps frappe --lang de --site production --fix-missing
 
 ```
 ai_translate/
-├── cli.py               CLI entrypoint
-├── policy.py            Policy Engine
-├── extractors.py        Code & JSON extraction
-├── translator.py        Groq API integration
-├── storage.py           CSV / translation storage
-├── manager.py           Frappe app & bench utilities
-├── fixers.py            Missing / duplicate repair
-├── db_scope.py          Safe DB extraction (Layers B & C)
-├── db_write.py          Non-destructive DB write
-├── gettext_sync.py      PO/MO sync & compilation
-├── output.py            Filtered stdout / logging
-└── progress.py          Progress bar + ETA
+├── cli.py                  CLI entrypoint (click-based)
+├── policy.py               Policy Engine with rejection reasons
+├── extractors.py           AST-based code & JSON extraction
+├── translator.py           Groq API integration with batching
+├── storage.py              CSV / translation storage
+├── manager.py              Frappe app & bench utilities
+├── fixers.py               Missing / duplicate repair
+├── db_scope.py             Safe DB extraction (Layers B & C)
+├── db_write.py             Non-destructive DB write
+├── gettext_sync.py         PO/MO sync & compilation (polib-based)
+├── output.py               Filtered stdout / logging
+├── progress.py             Progress bar + ETA
+├── language_memory.py      Language Memory System
+├── context_profile.py      Context Profile Builder
+├── translation_contract.py Translation Contract Builder
+├── audit.py                Translation Auditor
+├── review.py               Review Manager
+└── cache.py                Caching System
 ```
 
 ## License

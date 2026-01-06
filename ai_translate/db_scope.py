@@ -1,8 +1,10 @@
 """Database extraction for Layers B & C (whitelist-based, schema-safe)."""
 
+import os
 from dataclasses import dataclass
 from typing import Dict, Iterator, List, Optional
 
+from ai_translate.extractors import ExtractedString
 from ai_translate.policy import TranslationContext
 
 
@@ -77,14 +79,17 @@ class DBExtractor:
         ),
     ]
 
-    def __init__(self, frappe_db=None):
+    def __init__(self, frappe_db=None, site: Optional[str] = None):
         """
         Initialize DB extractor.
 
         Args:
             frappe_db: Frappe database connection (optional)
+            site: Site name for Frappe initialization
         """
         self.frappe_db = frappe_db
+        self.site = site
+        self._frappe_initialized = False
 
     def get_scopes_for_layers(self, layers: List[str]) -> List[DBExtractionScope]:
         """
@@ -103,9 +108,52 @@ class DBExtractor:
             scopes.extend(self.LAYER_C_SCOPES)
         return scopes
 
+    def _ensure_connection(self, site: Optional[str] = None):
+        """Ensure Frappe connection is initialized."""
+        if self._frappe_initialized:
+            return
+        
+        site = site or self.site
+        if not site:
+            return
+        
+        try:
+            import frappe
+            
+            # Initialize Frappe if not already initialized
+            if not frappe.db:
+                # Try to find bench path from environment or current directory
+                bench_path = os.getenv("FRAPPE_BENCH_PATH")
+                if not bench_path:
+                    # Try to find from current directory
+                    cwd = os.getcwd()
+                    if "frappe-bench" in cwd or "sites" in cwd:
+                        # Navigate to bench root
+                        parts = cwd.split("frappe-bench")
+                        if parts:
+                            bench_path = parts[0] + "frappe-bench"
+                        else:
+                            parts = cwd.split("sites")
+                            if parts:
+                                bench_path = parts[0]
+                
+                if bench_path:
+                    os.chdir(bench_path)
+                
+                frappe.init(site=site)
+                frappe.connect(site=site)
+            
+            self._frappe_initialized = True
+        except ImportError:
+            # Frappe not available, continue without DB extraction
+            pass
+        except Exception:
+            # Connection failed, continue without DB extraction
+            pass
+
     def extract_from_doctype(
         self, scope: DBExtractionScope, site: Optional[str] = None
-    ) -> Iterator[Dict]:
+    ) -> Iterator[ExtractedString]:
         """
         Extract records from a DocType.
 
@@ -114,41 +162,91 @@ class DBExtractor:
             site: Site name (optional)
 
         Yields:
-            Dictionary with doctype, name, field, value, and context
+            ExtractedString objects with doctype, field, value, and context
         """
-        if not self.frappe_db:
-            # In dry-run mode or without DB connection, return empty
+        site = site or self.site
+        if not site:
             return
-
+        
+        # Ensure Frappe connection
+        self._ensure_connection(site)
+        
         try:
-            # This would use frappe.db.get_all in real implementation
-            # For now, return structure
-            # In production, this would:
-            # 1. Connect to Frappe DB
-            # 2. Query doctype with filters
-            # 3. Extract specified fields
-            # 4. Yield structured data
-
-            # Placeholder structure
-            yield {
-                "doctype": scope.doctype,
-                "name": "example",
-                "field": scope.fields[0],
-                "value": "example value",
-                "context": TranslationContext(
-                    layer=scope.layer,
-                    doctype=scope.doctype,
-                    fieldname=scope.fields[0],
-                    data_nature="label" if scope.layer == "B" else "content",
-                    intent="user-facing",
-                ),
-            }
+            import frappe
+            
+            if not frappe.db:
+                return
+            
+            # Query all records of this DocType
+            filters = scope.filters or {}
+            records = frappe.db.get_all(
+                scope.doctype,
+                fields=["name"] + scope.fields,
+                filters=filters,
+                limit=None,  # Get all records
+            )
+            
+            for record in records:
+                record_name = record.get("name", "")
+                
+                # Extract each field
+                for field_name in scope.fields:
+                    field_value = record.get(field_name)
+                    
+                    # Skip empty values
+                    if not field_value or not isinstance(field_value, str):
+                        continue
+                    
+                    # Skip if value looks like an identifier or code
+                    if self._is_identifier_or_code(field_value):
+                        continue
+                    
+                    # Create context
+                    context = TranslationContext(
+                        layer=scope.layer,
+                        doctype=scope.doctype,
+                        fieldname=field_name,
+                        data_nature="label" if scope.layer == "B" else "content",
+                        intent="user-facing",
+                    )
+                    
+                    # Yield as ExtractedString
+                    yield ExtractedString(
+                        text=field_value,
+                        context=context,
+                        source_file=f"db:{scope.doctype}:{record_name}",
+                        line_number=0,
+                        original_line=f"{field_name}: {field_value}",
+                    )
+                    
+        except ImportError:
+            # Frappe not available
+            pass
         except Exception:
-            pass  # Fail silently in extraction
+            # Extraction failed, continue silently
+            pass
+    
+    def _is_identifier_or_code(self, value: str) -> bool:
+        """Check if value looks like an identifier or code (should not be translated)."""
+        if not value:
+            return True
+        
+        # Check for common identifier patterns
+        identifier_patterns = [
+            value.isupper() and len(value) > 3,  # UPPERCASE identifiers
+            value.replace("_", "").replace("-", "").isalnum() and len(value) < 20 and not " " in value,  # snake_case or kebab-case
+            value.startswith("_"),  # Private identifiers
+            value.startswith("__"),  # Magic methods
+            "/" in value and not " " in value,  # Paths/URLs without spaces
+            "@" in value,  # Email addresses
+            value.startswith("http"),  # URLs
+        ]
+        
+        return any(identifier_patterns)
 
     def extract_all(
         self, layers: List[str], site: Optional[str] = None
-    ) -> Iterator[Dict]:
+    ) -> Iterator[ExtractedString]:
         """
         Extract all records for specified layers.
 
@@ -157,8 +255,12 @@ class DBExtractor:
             site: Site name
 
         Yields:
-            Extracted records
+            ExtractedString objects
         """
+        site = site or self.site
+        if not site:
+            return
+        
         scopes = self.get_scopes_for_layers(layers)
         for scope in scopes:
             yield from self.extract_from_doctype(scope, site)

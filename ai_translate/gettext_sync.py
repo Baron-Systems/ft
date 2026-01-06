@@ -1,8 +1,16 @@
 """PO/MO sync and compilation utilities."""
 
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+try:
+    import polib
+    POLIB_AVAILABLE = True
+except ImportError:
+    POLIB_AVAILABLE = False
+    polib = None
 
 from ai_translate.output import OutputFilter
 from ai_translate.storage import TranslationStorage
@@ -31,12 +39,13 @@ class GettextSync:
         self.po_path = self.locale_path / f"{storage.lang}.po"
         self.mo_path = self.locale_path / f"{storage.lang}.mo"
 
-    def sync_csv_to_po(self, dry_run: bool = False) -> bool:
+    def sync_csv_to_po(self, dry_run: bool = False, merge: bool = True) -> bool:
         """
-        Sync CSV translations to PO file.
+        Sync CSV translations to PO file using polib.
 
         Args:
             dry_run: Dry run mode
+            merge: Merge with existing PO file if it exists
 
         Returns:
             True if successful
@@ -51,12 +60,60 @@ class GettextSync:
             return True
 
         try:
-            # Create PO file content
-            po_content = self._generate_po_content(entries)
-
-            # Write PO file
+            if not POLIB_AVAILABLE:
+                self.output.error("polib is required for PO file generation. Install it with: pip install polib")
+                return False
+            
+            # Load existing PO file if it exists and merge is enabled
+            if merge and self.po_path.exists():
+                po = polib.pofile(str(self.po_path))
+            else:
+                po = polib.POFile()
+            
+            # Set metadata
+            po.metadata.update({
+                "Content-Type": "text/plain; charset=UTF-8",
+                "Content-Transfer-Encoding": "8bit",
+                "Language": self.storage.lang,
+                "Plural-Forms": "nplurals=2; plural=(n != 1);",
+                "X-Generator": "ai-translate",
+                "POT-Creation-Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S%z"),
+                "PO-Revision-Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S%z"),
+            })
+            
+            # Add/update entries
+            entry_count = 0
+            for entry in entries:
+                # Check if entry already exists
+                existing_entry = po.find(entry.source_text)
+                
+                if existing_entry:
+                    # Update existing entry
+                    existing_entry.msgstr = entry.translated_text
+                    if entry.source_file:
+                        existing_entry.occurrences = [(entry.source_file, entry.line_number)]
+                else:
+                    # Create new entry
+                    po_entry = polib.POEntry(
+                        msgid=entry.source_text,
+                        msgstr=entry.translated_text,
+                    )
+                    if entry.source_file:
+                        po_entry.occurrences = [(entry.source_file, entry.line_number)]
+                    if entry.context:
+                        # Add context as comment
+                        context_str = f"Layer: {entry.context.layer}"
+                        if entry.context.doctype:
+                            context_str += f", DocType: {entry.context.doctype}"
+                        if entry.context.fieldname:
+                            context_str += f", Field: {entry.context.fieldname}"
+                        po_entry.comment = context_str
+                    po.append(po_entry)
+                    entry_count += 1
+            
+            # Save PO file
             self.po_path.parent.mkdir(parents=True, exist_ok=True)
-            self.po_path.write_text(po_content, encoding="utf-8")
+            po.save(str(self.po_path))
 
             self.output.success(f"Synced {len(entries)} translations to {self.po_path}")
             return True
@@ -108,32 +165,4 @@ class GettextSync:
             self.output.error(f"Failed to compile MO: {e}")
             return False
 
-    def _generate_po_content(self, entries) -> str:
-        """Generate PO file content from entries."""
-        lines = [
-            'msgid ""',
-            'msgstr ""',
-            '"Content-Type: text/plain; charset=UTF-8\\n"',
-            "",
-        ]
-
-        for entry in entries:
-            # Escape quotes and newlines
-            source = self._escape_po_string(entry.source_text)
-            translated = self._escape_po_string(entry.translated_text)
-
-            lines.append(f'msgid "{source}"')
-            lines.append(f'msgstr "{translated}"')
-            lines.append("")
-
-        return "\n".join(lines)
-
-    def _escape_po_string(self, text: str) -> str:
-        """Escape string for PO format."""
-        return (
-            text.replace("\\", "\\\\")
-            .replace('"', '\\"')
-            .replace("\n", "\\n")
-            .replace("\t", "\\t")
-        )
 

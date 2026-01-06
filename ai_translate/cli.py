@@ -1,4 +1,4 @@
-"""CLI entrypoint for ai-translate."""
+"""CLI entrypoint for ai-translate - Language-Agnostic Localization Infrastructure."""
 
 import os
 import subprocess
@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-import typer
+import click
 from rich.console import Console
 
 from ai_translate.db_scope import DBExtractor
@@ -20,343 +20,75 @@ from ai_translate.progress import ProgressTracker
 from ai_translate.storage import TranslationEntry, TranslationStorage
 from ai_translate.translator import Translator
 
-app = typer.Typer(
-    name="ai-translate",
-    help="AI-powered translation system for Frappe / ERPNext",
-    add_completion=False,
-)
 console = Console()
 
 
-def cli_entrypoint():
-    """CLI entrypoint - parses arguments manually to avoid Typer issues."""
-    import sys
-    args = sys.argv[1:]
+@click.group()
+@click.version_option(version="1.0.0")
+def cli():
+    """AI-powered Localization Infrastructure for Frappe / ERPNext.
     
-    # Check if this is a subcommand (review, list-benches)
-    if args and args[0] in ["review", "list-benches"]:
-        # Let Typer handle subcommands
-        app()
-        return
-    
-    # Check if this looks like a translate command (has --lang)
-    if "--lang" in args:
-        # Parse arguments manually
-        apps = None
-        lang = None
-        site = None
-        bench_path = None
-        verbose = False
-        
-        i = 0
-        while i < len(args):
-            arg = args[i]
-            if arg == "--lang":
-                if i + 1 < len(args):
-                    lang = args[i + 1]
-                    i += 2
-                else:
-                    break
-            elif arg == "--site":
-                if i + 1 < len(args):
-                    site = args[i + 1]
-                    i += 2
-                else:
-                    break
-            elif arg == "--bench-path":
-                if i + 1 < len(args):
-                    bench_path = args[i + 1]
-                    i += 2
-                else:
-                    break
-            elif arg == "--verbose":
-                verbose = True
-                i += 1
-            elif not arg.startswith("-"):
-                # This should be the apps argument
-                apps = arg
-                i += 1
-            else:
-                i += 1
-        
-        if apps and lang:
-            _translate_impl(apps=apps, lang=lang, site=site, bench_path=bench_path, verbose=verbose)
-        else:
-            output = OutputFilter(verbose=verbose)
-            output.error("App name(s) and --lang are required")
-            output.info("\nUsage:")
-            output.info("  ai-translate <apps> --lang <lang> [--site <site>]")
-            output.info("\nExample:")
-            output.info("  ai-translate erpnext --lang ar --site mysite")
-            sys.exit(1)
-    else:
-        # No --lang found, let Typer show help or handle subcommands
-        app()
-
-
-@app.callback()
-def main(ctx: typer.Context):
-    """Main callback - only handles subcommands."""
+    Language-Agnostic translation system that localizes user-visible semantics
+    while preserving internal representations and logic.
+    """
     pass
 
 
-def _translate_impl(
+@cli.command()
+@click.argument('apps', required=True)
+@click.option('--lang', '-l', required=True, help='Target language code (e.g., ar, fr, de, es)')
+@click.option('--site', '-s', help='Site name (required for Layers B & C)')
+@click.option('--bench-path', '-b', help='Path to bench directory')
+@click.option('--db-scope', is_flag=True, help='Include database content (Layers B & C)')
+@click.option('--db-scope-only', is_flag=True, help='Only process database content (skip Layer A)')
+@click.option('--db-doc-types', help='Comma-separated allowlist of DocTypes to extract')
+@click.option('--verbose', '-v', is_flag=True, help='Verbose output')
+@click.option('--slow-mode', is_flag=True, help='Enable slow mode (rate limiting)')
+@click.option('--dry-run', is_flag=True, help='Dry run mode (no writes)')
+def translate(
     apps: str,
     lang: str,
     site: Optional[str],
     bench_path: Optional[str],
+    db_scope: bool,
+    db_scope_only: bool,
+    db_doc_types: Optional[str],
     verbose: bool,
+    slow_mode: bool,
+    dry_run: bool,
 ):
-    """
-    Implementation of translate command.
+    """Translate app(s) - extracts all user-visible strings and translates missing ones.
     
     Automatically extracts from:
-    - Code files (Python, JavaScript, HTML)
-    - JSON fixtures (DocTypes, Workspaces, Reports, etc.)
-    - Database content (if --site is provided)
+    - Code files (Python, JavaScript, HTML) - Layer A
+    - JSON fixtures (DocTypes, Workspaces, Reports, etc.) - Layer A
+    - Database content (if --site and --db-scope provided) - Layers B & C
     
     Only translates missing strings - preserves existing translations.
+    
+    Examples:
+        ai-translate erpnext --lang ar --site mysite
+        ai-translate erpnext --lang ar --site mysite --db-scope
+        ai-translate erpnext --lang ar --db-scope-only --db-doc-types "Workspace,Report"
     """
-    
-    # Initialize output
-    output = OutputFilter(verbose=verbose)
-
-    # Check API key
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        output.error("GROQ_API_KEY environment variable is required")
-        sys.exit(1)
-
-    # Automatically process all layers (A, B, C)
-    # Layer A: Code & Files (always)
-    # Layers B & C: Database content (if site provided)
-    layer_list = ["A"]  # Always include Layer A
-    if site:
-        layer_list.extend(["B", "C"])  # Add database layers if site provided
-
-    # Initialize bench manager
-    # If site is provided but bench_path is not, try to get bench from site name using Frappe Manager
-    if site and not bench_path:
-        temp_manager = BenchManager(bench_path=None, output=output)
-        bench_from_site = temp_manager.get_bench_path_from_site(site)
-        if bench_from_site:
-            bench_path = str(bench_from_site)
-            output.info(f"Found bench from site '{site}': {bench_path}", verbose_only=True)
-    
-    bench_manager = BenchManager(bench_path=bench_path, output=output)
-    if not bench_manager.bench_path:
-        output.error("Could not find bench directory")
-        output.info("")
-        output.info("Tips:")
-        output.info("  1. Use --bench-path to specify the bench directory explicitly")
-        output.info("  2. If using Frappe Manager, the tool will try to find bench from site name")
-        output.info("  3. Run: fm list to see available sites")
-        output.info("  4. Navigate to the bench directory and run the command from there")
-        output.info("")
-        output.info("Example:")
-        output.info("  ai-translate erpnext --lang ar --site site-name")
-        output.info("  ai-translate --bench-path /path/to/bench erpnext --lang ar --site site-name")
-        sys.exit(1)
-
-    output.info(f"Bench path: {bench_manager.bench_path}")
-
-    # Parse app names
-    app_names = [a.strip() for a in apps.split(",") if a.strip()]
-
-    if not app_names:
-        output.error("No apps found to process")
-        sys.exit(1)
-
-    output.info(f"Processing {len(app_names)} app(s): {', '.join(app_names)}")
-
-    # Initialize translator
-    try:
-        translator = Translator(api_key=api_key, slow_mode=False, output=output)
-    except Exception as e:
-        output.error(f"Failed to initialize translator: {e}")
-        sys.exit(1)
-
-    # Process each app separately
-    all_app_stats = []
-
-    for app_name in app_names:
-        app_path = bench_manager.get_app_path(app_name)
-        if not app_path:
-            output.warning(f"App path not found: {app_name}")
-            continue
-
-        output.info(f"Processing app: {app_name}")
-
-        # Initialize storage for this app - use app's translation directory
-        # Frappe standard: apps/app_name/app_name/translations/lang.csv
-        app_translations_path = app_path / app_name / "translations"
-        storage = TranslationStorage(storage_path=app_translations_path, lang=lang)
-        output.info(f"Using translation file: {storage.csv_path}")
-
-        # Extract strings for this app only
-        app_extracted = []
-
-        # Layer A: Code & Files
-        if "A" in layer_list:
-            extractor = LayerAExtractor(app_name=app_name, app_path=app_path)
-            extracted = list(extractor.extract_all())
-            app_extracted.extend(extracted)
-            output.info(f"Extracted {len(extracted)} strings from Layer A")
-
-        # Layers B & C: Database
-        if {"B", "C"} & set(layer_list):
-            db_extractor = DBExtractor()
-            db_extracted = list(
-                db_extractor.extract_all(layers=layer_list, site=site)
-            )
-            # Convert DB extracted to ExtractedString format
-            # (This would need proper conversion in production)
-            output.info(f"Extracted {len(db_extracted)} strings from Layers B/C")
-
-        # Filter and translate for this app only
-        output.info(f"Total extracted for {app_name}: {len(app_extracted)}")
-
-        # Apply policy and filter
-        from ai_translate.policy import PolicyEngine
-
-        policy = PolicyEngine()
-        to_translate = []
-
-        for extracted in app_extracted:
-            decision = policy.decide(extracted.text, extracted.context)
-            if decision.value == "translate":
-                # Check if already translated
-                existing = storage.get(extracted.text, extracted.context)
-                if not existing:  # Only translate if not already translated
-                    to_translate.append(extracted)
-
-        total_to_translate = len(to_translate)
-        output.info(f"Strings to translate: {total_to_translate}")
-
-        if total_to_translate == 0:
-            output.info(f"No new strings to translate for {app_name}")
-            continue
-
-        # Translate
-        translation_stats = {
-            "translated": 0,
-            "failed": 0,
-            "skipped": 0,
-            "rejected": 0,
-        }
-        
-        # Always run translation
-        if True:
-            consecutive_failures = 0
-            max_consecutive_failures = 5  # Stop after 5 consecutive failures
-            
-            with ProgressTracker(total=total_to_translate, description=f"Translating {app_name}") as progress:
-                for extracted in to_translate:
-                    translated, status = translator.translate(
-                        extracted.text, lang, source_lang="en"
-                    )
-                    
-                    # Track statistics
-                    if status == "ok" and translated:
-                        consecutive_failures = 0  # Reset failure counter
-                        translation_stats["translated"] += 1
-                        storage.set(
-                            extracted.text,
-                            translated,
-                            extracted.context,
-                            extracted.source_file,
-                            extracted.line_number,
-                        )
-                    elif status == "failed":
-                        consecutive_failures += 1
-                        translation_stats["failed"] += 1
-                        if consecutive_failures >= max_consecutive_failures:
-                            output.error(f"Stopping translation after {max_consecutive_failures} consecutive failures")
-                            output.error("Please check your API key and model availability")
-                            break
-                    elif status == "skipped":
-                        translation_stats["skipped"] += 1
-                    elif status == "rejected":
-                        translation_stats["rejected"] += 1
-                    
-                    progress.update()
-
-            # Save storage for this app
-            storage.save()
-            output.success(f"✓ Translations saved to: {storage.csv_path}")
-        
-        # Store stats for summary
-        all_app_stats.append((app_name, translation_stats, app_extracted))
-
-    # Note: Fix missing, PO/MO sync, and DB writes are skipped when using app translation files
-    # These features work with site-based storage only
-    if all_app_stats:
-        output.info("\nNote: Translations are saved directly to app translation files.")
-        output.info("PO/MO sync and database writes are skipped when using app translation files.")
-
-    # Print comprehensive statistics for all apps
-    from ai_translate.policy import PolicyEngine
-    policy = PolicyEngine()
-    policy_stats = policy.get_stats()
-    
-    # Aggregate stats from all apps
-    total_final_stats = {
-        "translated": 0,
-        "failed": 0,
-        "skipped": 0,
-        "rejected": 0,
-    }
-    
-    for app_name, app_stats, app_extracted in all_app_stats:
-        for key in total_final_stats:
-            total_final_stats[key] += app_stats.get(key, 0)
-    
-    final_stats = total_final_stats
-
-    # Print summary only after progress bar is done
-    console.print()  # Empty line after progress bar
-    console.print("[bold green]═══════════════════════════════════════════════════════════[/bold green]")
-    console.print("[bold]📊 Translation Summary[/bold]")
-    console.print("[bold green]═══════════════════════════════════════════════════════════[/bold green]\n")
-    
-    console.print("[bold]Policy Decisions:[/bold]")
-    console.print(f"  ✓ TRANSLATE: [green]{policy_stats.get('TRANSLATE', 0)}[/green]")
-    console.print(f"  ⊘ SKIP: [yellow]{policy_stats.get('SKIP', 0)}[/yellow]")
-    console.print(f"  ⊘ KEEP_ORIGINAL: [yellow]{policy_stats.get('KEEP_ORIGINAL', 0)}[/yellow]\n")
-    
-    console.print("[bold]Translation Results:[/bold]")
-    console.print(f"  ✓ Translated: [green]{final_stats.get('translated', 0)}[/green]")
-    if final_stats.get('failed', 0) > 0:
-        console.print(f"  ✗ Failed: [red]{final_stats.get('failed', 0)}[/red]")
-    if final_stats.get('skipped', 0) > 0:
-        console.print(f"  ⊘ Skipped: [yellow]{final_stats.get('skipped', 0)}[/yellow]")
-    if final_stats.get('rejected', 0) > 0:
-        console.print(f"  ⚠ Rejected (placeholder issues): [yellow]{final_stats.get('rejected', 0)}[/yellow]")
-        if verbose:
-            output.info("Use --verbose to see details of rejected translations", verbose_only=True)
-    
-    # Calculate success rate
-    total_processed = sum(final_stats.values())
-    if total_processed > 0:
-        success_rate = (final_stats.get('translated', 0) / total_processed) * 100
-        console.print(f"\n  Success Rate: [bold]{success_rate:.1f}%[/bold]")
-    
-    console.print("\n[bold green]═══════════════════════════════════════════════════════════[/bold green]\n")
-
-    # Translation complete
+    _translate_impl(
+        apps=apps,
+        lang=lang,
+        site=site,
+        bench_path=bench_path,
+        db_scope=db_scope,
+        db_scope_only=db_scope_only,
+        db_doc_types=db_doc_types,
+        verbose=verbose,
+        slow_mode=slow_mode,
+        dry_run=dry_run,
+    )
 
 
-@app.command(name="list-benches")
-def list_benches(
-    verbose: bool = typer.Option(
-        False,
-        "--verbose",
-        help="Verbose output",
-    ),
-):
-    """
-    List available benches (including Frappe Manager benches).
-    """
+@cli.command(name='list-benches')
+@click.option('--verbose', '-v', is_flag=True, help='Verbose output')
+def list_benches(verbose: bool):
+    """List available benches (including Frappe Manager benches)."""
     output = OutputFilter(verbose=verbose)
     output.info("Searching for benches...")
     
@@ -480,22 +212,28 @@ def list_benches(
     if not benches_found:
         output.warning("No benches found")
         output.info("\nTo use a bench, specify it with --bench-path:")
-        output.info("  ai-translate --bench-path /path/to/bench --apps frappe --lang ar --site site-name")
+        output.info("  ai-translate translate erpnext --lang ar --site site-name --bench-path /path/to/bench")
     else:
         output.success(f"\nFound {len(benches_found)} bench(es)")
         output.info("\nUse --bench-path to specify which bench to use")
 
 
-@app.command(name="review")
-def review_translations(
-    apps: str = typer.Argument(..., help="App name(s) to review (comma-separated)"),
-    lang: str = typer.Option(..., "--lang", help="Language code to review"),
-    app_description: Optional[str] = typer.Option(None, "--context", help="App description/context for better translation (e.g., 'Human Resources Management System')"),
-    bench_path: Optional[str] = typer.Option(None, "--bench-path", help="Path to bench directory"),
-    verbose: bool = typer.Option(False, "--verbose", help="Verbose output"),
+@cli.command()
+@click.argument('apps', required=True)
+@click.option('--lang', '-l', required=True, help='Language code to review')
+@click.option('--context', '-c', help='App description/context for better translation')
+@click.option('--bench-path', '-b', help='Path to bench directory')
+@click.option('--status', help='Filter by review status (e.g., needs_review)')
+@click.option('--verbose', '-v', is_flag=True, help='Verbose output')
+def review(
+    apps: str,
+    lang: str,
+    context: Optional[str],
+    bench_path: Optional[str],
+    status: Optional[str],
+    verbose: bool,
 ):
-    """
-    Review and improve translations with AI context.
+    """Review and improve translations with AI context.
     
     Allows you to provide app context/description to improve translations
     based on meaning and context rather than literal translation.
@@ -531,8 +269,8 @@ def review_translations(
         sys.exit(1)
     
     output.info(f"Reviewing translations for: {', '.join(app_names)}")
-    if app_description:
-        output.info(f"App context: {app_description}")
+    if context:
+        output.info(f"App context: {context}")
     
     # Process each app
     for app_name in app_names:
@@ -553,6 +291,12 @@ def review_translations(
         
         # Load all translations
         all_entries = storage.get_all()
+        
+        # Filter by status if provided
+        if status:
+            # This will be implemented when review_status is added to TranslationEntry
+            pass
+        
         output.info(f"Found {len(all_entries)} translations")
         
         if not all_entries:
@@ -564,14 +308,14 @@ def review_translations(
         with ProgressTracker(total=len(all_entries), description="Reviewing") as progress:
             for entry in all_entries:
                 # Re-translate with context
-                translated, status = translator.translate(
+                translated, trans_status = translator.translate(
                     entry.source_text,
                     lang,
                     source_lang="en",
-                    context=app_description
+                    context=context
                 )
                 
-                if status == "ok" and translated and translated != entry.translated_text:
+                if trans_status == "ok" and translated and translated != entry.translated_text:
                     # Update if translation improved
                     storage.set(
                         entry.source_text,
@@ -589,9 +333,304 @@ def review_translations(
         output.success(f"✓ Reviewed {reviewed_count} translations for {app_name}")
 
 
-# cli_entrypoint is defined above (line 31)
+@cli.command()
+@click.argument('apps', required=True)
+@click.option('--lang', '-l', required=True, help='Language code to audit')
+@click.option('--bench-path', '-b', help='Path to bench directory')
+@click.option('--verbose', '-v', is_flag=True, help='Verbose output')
+def audit(
+    apps: str,
+    lang: str,
+    bench_path: Optional[str],
+    verbose: bool,
+):
+    """Audit translations - show statistics and rejection reasons.
+    
+    Provides comprehensive statistics per language including:
+    - Translation counts
+    - Rejection reasons summary
+    - Samples per DocType/field
+    - New translations needing review
+    
+    Example:
+        ai-translate audit erpnext --lang ar
+    """
+    # This will be implemented when audit module is created
+    output = OutputFilter(verbose=verbose)
+    output.info("Audit functionality will be available after audit module implementation")
+    output.info(f"Auditing translations for: {apps}, language: {lang}")
+
+
+def _translate_impl(
+    apps: str,
+    lang: str,
+    site: Optional[str],
+    bench_path: Optional[str],
+    db_scope: bool,
+    db_scope_only: bool,
+    db_doc_types: Optional[str],
+    verbose: bool,
+    slow_mode: bool,
+    dry_run: bool,
+):
+    """
+    Implementation of translate command.
+    
+    Automatically extracts from:
+    - Code files (Python, JavaScript, HTML)
+    - JSON fixtures (DocTypes, Workspaces, Reports, etc.)
+    - Database content (if --site and --db-scope provided)
+    
+    Only translates missing strings - preserves existing translations.
+    """
+    
+    # Initialize output
+    output = OutputFilter(verbose=verbose)
+
+    # Check API key
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        output.error("GROQ_API_KEY environment variable is required")
+        sys.exit(1)
+
+    # Determine layers to process
+    layer_list = []
+    if not db_scope_only:
+        layer_list.append("A")  # Always include Layer A unless db-scope-only
+    if db_scope or db_scope_only:
+        if not site:
+            output.error("--site is required when using --db-scope or --db-scope-only")
+            sys.exit(1)
+        layer_list.extend(["B", "C"])  # Add database layers
+    
+    if not layer_list:
+        output.error("No layers to process. Use --db-scope to include database content.")
+        sys.exit(1)
+
+    # Parse db_doc_types allowlist
+    doc_types_allowlist = None
+    if db_doc_types:
+        doc_types_allowlist = [dt.strip() for dt in db_doc_types.split(",") if dt.strip()]
+
+    # Initialize bench manager
+    # If site is provided but bench_path is not, try to get bench from site name using Frappe Manager
+    if site and not bench_path:
+        temp_manager = BenchManager(bench_path=None, output=output)
+        bench_from_site = temp_manager.get_bench_path_from_site(site)
+        if bench_from_site:
+            bench_path = str(bench_from_site)
+            output.info(f"Found bench from site '{site}': {bench_path}", verbose_only=True)
+    
+    bench_manager = BenchManager(bench_path=bench_path, output=output)
+    if not bench_manager.bench_path:
+        output.error("Could not find bench directory")
+        output.info("")
+        output.info("Tips:")
+        output.info("  1. Use --bench-path to specify the bench directory explicitly")
+        output.info("  2. If using Frappe Manager, the tool will try to find bench from site name")
+        output.info("  3. Run: fm list to see available sites")
+        output.info("  4. Navigate to the bench directory and run the command from there")
+        output.info("")
+        output.info("Example:")
+        output.info("  ai-translate translate erpnext --lang ar --site site-name")
+        output.info("  ai-translate translate erpnext --lang ar --site site-name --bench-path /path/to/bench")
+        sys.exit(1)
+
+    output.info(f"Bench path: {bench_manager.bench_path}")
+
+    # Parse app names
+    app_names = [a.strip() for a in apps.split(",") if a.strip()]
+
+    if not app_names:
+        output.error("No apps found to process")
+        sys.exit(1)
+
+    output.info(f"Processing {len(app_names)} app(s): {', '.join(app_names)}")
+    output.info(f"Layers: {', '.join(layer_list)}")
+
+    # Initialize translator
+    try:
+        translator = Translator(api_key=api_key, slow_mode=slow_mode, output=output)
+    except Exception as e:
+        output.error(f"Failed to initialize translator: {e}")
+        sys.exit(1)
+
+    # Process each app separately
+    all_app_stats = []
+
+    for app_name in app_names:
+        app_path = bench_manager.get_app_path(app_name)
+        if not app_path:
+            output.warning(f"App path not found: {app_name}")
+            continue
+
+        output.info(f"Processing app: {app_name}")
+
+        # Initialize storage for this app - use app's translation directory
+        # Frappe standard: apps/app_name/app_name/translations/lang.csv
+        app_translations_path = app_path / app_name / "translations"
+        storage = TranslationStorage(storage_path=app_translations_path, lang=lang)
+        output.info(f"Using translation file: {storage.csv_path}")
+
+        # Extract strings for this app only
+        app_extracted = []
+
+        # Layer A: Code & Files
+        if "A" in layer_list:
+            extractor = LayerAExtractor(app_name=app_name, app_path=app_path)
+            extracted = list(extractor.extract_all())
+            app_extracted.extend(extracted)
+            output.info(f"Extracted {len(extracted)} strings from Layer A")
+
+        # Layers B & C: Database
+        if {"B", "C"} & set(layer_list):
+            db_extractor = DBExtractor()
+            if doc_types_allowlist:
+                # Filter scopes by allowlist
+                scopes = db_extractor.get_scopes_for_layers(layer_list)
+                filtered_scopes = [s for s in scopes if s.doctype in doc_types_allowlist]
+                db_extracted = []
+                for scope in filtered_scopes:
+                    db_extracted.extend(list(db_extractor.extract_from_doctype(scope, site=site)))
+            else:
+                db_extracted = list(
+                    db_extractor.extract_all(layers=layer_list, site=site)
+                )
+            # Convert DB extracted to ExtractedString format
+            # TODO: Proper conversion when DB extraction is fully implemented
+            output.info(f"Extracted {len(db_extracted)} strings from Layers B/C")
+
+        # Filter and translate for this app only
+        output.info(f"Total extracted for {app_name}: {len(app_extracted)}")
+
+        # Apply policy and filter
+        from ai_translate.policy import PolicyEngine
+
+        policy = PolicyEngine()
+        to_translate = []
+
+        for extracted in app_extracted:
+            decision, reason = policy.decide(extracted.text, extracted.context)
+            if decision.value == "translate":
+                # Check if already translated
+                existing = storage.get(extracted.text, extracted.context)
+                if not existing:  # Only translate if not already translated
+                    to_translate.append(extracted)
+
+        total_to_translate = len(to_translate)
+        output.info(f"Strings to translate: {total_to_translate}")
+
+        if total_to_translate == 0:
+            output.info(f"No new strings to translate for {app_name}")
+            continue
+
+        # Translate
+        translation_stats = {
+            "translated": 0,
+            "failed": 0,
+            "skipped": 0,
+            "rejected": 0,
+        }
+        
+        if not dry_run:
+            consecutive_failures = 0
+            max_consecutive_failures = 5  # Stop after 5 consecutive failures
+            
+            with ProgressTracker(total=total_to_translate, description=f"Translating {app_name}") as progress:
+                for extracted in to_translate:
+                    translated, trans_status = translator.translate(
+                        extracted.text, lang, source_lang="en"
+                    )
+                    
+                    # Track statistics
+                    if trans_status == "ok" and translated:
+                        consecutive_failures = 0  # Reset failure counter
+                        translation_stats["translated"] += 1
+                        storage.set(
+                            extracted.text,
+                            translated,
+                            extracted.context,
+                            extracted.source_file,
+                            extracted.line_number,
+                        )
+                    elif trans_status == "failed":
+                        consecutive_failures += 1
+                        translation_stats["failed"] += 1
+                        if consecutive_failures >= max_consecutive_failures:
+                            output.error(f"Stopping translation after {max_consecutive_failures} consecutive failures")
+                            output.error("Please check your API key and model availability")
+                            break
+                    elif trans_status == "skipped":
+                        translation_stats["skipped"] += 1
+                    elif trans_status == "rejected":
+                        translation_stats["rejected"] += 1
+                    
+                    progress.update()
+
+            # Save storage for this app
+            storage.save()
+            output.success(f"✓ Translations saved to: {storage.csv_path}")
+        else:
+            output.info("Dry run - no translations saved")
+        
+        # Store stats for summary
+        all_app_stats.append((app_name, translation_stats, app_extracted))
+
+    # Print comprehensive statistics for all apps
+    from ai_translate.policy import PolicyEngine
+    policy = PolicyEngine()
+    policy_stats = policy.get_stats()
+    
+    # Aggregate stats from all apps
+    total_final_stats = {
+        "translated": 0,
+        "failed": 0,
+        "skipped": 0,
+        "rejected": 0,
+    }
+    
+    for app_name, app_stats, app_extracted in all_app_stats:
+        for key in total_final_stats:
+            total_final_stats[key] += app_stats.get(key, 0)
+    
+    final_stats = total_final_stats
+
+    # Print summary only after progress bar is done
+    console.print()  # Empty line after progress bar
+    console.print("[bold green]═══════════════════════════════════════════════════════════[/bold green]")
+    console.print("[bold]📊 Translation Summary[/bold]")
+    console.print("[bold green]═══════════════════════════════════════════════════════════[/bold green]\n")
+    
+    console.print("[bold]Policy Decisions:[/bold]")
+    console.print(f"  ✓ TRANSLATE: [green]{policy_stats.get('TRANSLATE', 0)}[/green]")
+    console.print(f"  ⊘ SKIP: [yellow]{policy_stats.get('SKIP', 0)}[/yellow]")
+    console.print(f"  ⊘ KEEP_ORIGINAL: [yellow]{policy_stats.get('KEEP_ORIGINAL', 0)}[/yellow]\n")
+    
+    console.print("[bold]Translation Results:[/bold]")
+    console.print(f"  ✓ Translated: [green]{final_stats.get('translated', 0)}[/green]")
+    if final_stats.get('failed', 0) > 0:
+        console.print(f"  ✗ Failed: [red]{final_stats.get('failed', 0)}[/red]")
+    if final_stats.get('skipped', 0) > 0:
+        console.print(f"  ⊘ Skipped: [yellow]{final_stats.get('skipped', 0)}[/yellow]")
+    if final_stats.get('rejected', 0) > 0:
+        console.print(f"  ⚠ Rejected (placeholder issues): [yellow]{final_stats.get('rejected', 0)}[/yellow]")
+        if verbose:
+            output.info("Use --verbose to see details of rejected translations", verbose_only=True)
+    
+    # Calculate success rate
+    total_processed = sum(final_stats.values())
+    if total_processed > 0:
+        success_rate = (final_stats.get('translated', 0) / total_processed) * 100
+        console.print(f"\n  Success Rate: [bold]{success_rate:.1f}%[/bold]")
+    
+    console.print("\n[bold green]═══════════════════════════════════════════════════════════[/bold green]\n")
+
+
+def cli_entrypoint():
+    """CLI entrypoint for console script."""
+    cli()
+
 
 # Make app callable for direct execution
 if __name__ == "__main__":
     cli_entrypoint()
-

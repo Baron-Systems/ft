@@ -1,5 +1,6 @@
 """Code and JSON extraction for Layer A."""
 
+import ast
 import json
 import re
 from dataclasses import dataclass
@@ -72,23 +73,83 @@ class CodeExtractor:
             return
 
         suffix = file_path.suffix.lower()
-        patterns = []
 
-        if suffix == ".py":
-            patterns = self.PYTHON_PATTERNS
-        elif suffix in (".js", ".jsx"):
-            patterns = self.JS_PATTERNS
-        elif suffix in (".html", ".jinja", ".jinja2"):
-            patterns = self.JINJA_PATTERNS
-        elif suffix == ".vue":
-            patterns = self.VUE_PATTERNS
-        else:
-            return
-
+        try:
+            if suffix == ".py":
+                # Try AST-based extraction first
+                yield from self._extract_from_python_ast(file_path, layer)
+                # Fallback to regex if AST fails
+                yield from self._extract_from_python_regex(file_path, layer)
+            elif suffix in (".js", ".jsx"):
+                # Try AST-based extraction first (if available)
+                yield from self._extract_from_js_ast(file_path, layer)
+                # Fallback to regex
+                yield from self._extract_from_js_regex(file_path, layer)
+            elif suffix in (".html", ".jinja", ".jinja2"):
+                yield from self._extract_from_jinja(file_path, layer)
+            elif suffix == ".vue":
+                yield from self._extract_from_vue(file_path, layer)
+        except Exception:
+            pass  # Skip files that can't be read
+    
+    def _extract_from_python_ast(
+        self, file_path: Path, layer: str
+    ) -> Iterator[ExtractedString]:
+        """Extract using Python AST."""
+        try:
+            content = file_path.read_text(encoding="utf-8")
+            tree = ast.parse(content, filename=str(file_path))
+            
+            for node in ast.walk(tree):
+                # Look for function calls: _("text"), __("text"), _lt("text")
+                if isinstance(node, ast.Call):
+                    if isinstance(node.func, ast.Name):
+                        func_name = node.func.id
+                        if func_name in ("_", "__", "_lt"):
+                            if node.args and isinstance(node.args[0], (ast.Str, ast.Constant)):
+                                # Handle both ast.Str (Python < 3.8) and ast.Constant (Python >= 3.8)
+                                if isinstance(node.args[0], ast.Str):
+                                    text = node.args[0].s
+                                elif isinstance(node.args[0], ast.Constant):
+                                    if isinstance(node.args[0].value, str):
+                                        text = node.args[0].value
+                                    else:
+                                        continue
+                                else:
+                                    continue
+                                
+                                # Handle f-strings (joined strings)
+                                if isinstance(node.args[0], ast.JoinedStr):
+                                    # Skip f-strings for now (complex)
+                                    continue
+                                
+                                if text and isinstance(text, str):
+                                    context = TranslationContext(
+                                        layer=layer,
+                                        app=self.app_name,
+                                        ui_surface=self._detect_ui_surface(file_path),
+                                        data_nature="label",
+                                        intent="user-facing",
+                                    )
+                                    yield ExtractedString(
+                                        text=text,
+                                        context=context,
+                                        source_file=str(file_path.relative_to(file_path.parents[2])),
+                                        line_number=node.lineno,
+                                        original_line=content.splitlines()[node.lineno - 1] if node.lineno <= len(content.splitlines()) else "",
+                                    )
+        except (SyntaxError, ValueError):
+            # AST parsing failed, will fallback to regex
+            pass
+    
+    def _extract_from_python_regex(
+        self, file_path: Path, layer: str
+    ) -> Iterator[ExtractedString]:
+        """Extract using regex (fallback)."""
         try:
             content = file_path.read_text(encoding="utf-8")
             for line_num, line in enumerate(content.splitlines(), 1):
-                for pattern in patterns:
+                for pattern in self.PYTHON_PATTERNS:
                     for match in pattern.finditer(line):
                         text = match.group(1)
                         context = TranslationContext(
@@ -106,7 +167,97 @@ class CodeExtractor:
                             original_line=line.strip(),
                         )
         except Exception:
-            pass  # Skip files that can't be read
+            pass
+    
+    def _extract_from_js_ast(
+        self, file_path: Path, layer: str
+    ) -> Iterator[ExtractedString]:
+        """Extract using JavaScript AST (placeholder - would need esprima or similar)."""
+        # JavaScript AST parsing requires external library (esprima, acorn, etc.)
+        # For now, this is a placeholder that falls back to regex
+        # In production, you could use: import esprima
+        pass
+    
+    def _extract_from_js_regex(
+        self, file_path: Path, layer: str
+    ) -> Iterator[ExtractedString]:
+        """Extract using regex (fallback for JS)."""
+        try:
+            content = file_path.read_text(encoding="utf-8")
+            for line_num, line in enumerate(content.splitlines(), 1):
+                for pattern in self.JS_PATTERNS:
+                    for match in pattern.finditer(line):
+                        text = match.group(1)
+                        context = TranslationContext(
+                            layer=layer,
+                            app=self.app_name,
+                            ui_surface=self._detect_ui_surface(file_path),
+                            data_nature="label",
+                            intent="user-facing",
+                        )
+                        yield ExtractedString(
+                            text=text,
+                            context=context,
+                            source_file=str(file_path.relative_to(file_path.parents[2])),
+                            line_number=line_num,
+                            original_line=line.strip(),
+                        )
+        except Exception:
+            pass
+    
+    def _extract_from_jinja(
+        self, file_path: Path, layer: str
+    ) -> Iterator[ExtractedString]:
+        """Extract from Jinja templates."""
+        try:
+            content = file_path.read_text(encoding="utf-8")
+            for line_num, line in enumerate(content.splitlines(), 1):
+                for pattern in self.JINJA_PATTERNS:
+                    for match in pattern.finditer(line):
+                        text = match.group(1)
+                        context = TranslationContext(
+                            layer=layer,
+                            app=self.app_name,
+                            ui_surface=self._detect_ui_surface(file_path),
+                            data_nature="label",
+                            intent="user-facing",
+                        )
+                        yield ExtractedString(
+                            text=text,
+                            context=context,
+                            source_file=str(file_path.relative_to(file_path.parents[2])),
+                            line_number=line_num,
+                            original_line=line.strip(),
+                        )
+        except Exception:
+            pass
+    
+    def _extract_from_vue(
+        self, file_path: Path, layer: str
+    ) -> Iterator[ExtractedString]:
+        """Extract from Vue templates."""
+        try:
+            content = file_path.read_text(encoding="utf-8")
+            for line_num, line in enumerate(content.splitlines(), 1):
+                for pattern in self.VUE_PATTERNS:
+                    for match in pattern.finditer(line):
+                        text = match.group(1)
+                        context = TranslationContext(
+                            layer=layer,
+                            app=self.app_name,
+                            ui_surface=self._detect_ui_surface(file_path),
+                            data_nature="label",
+                            intent="user-facing",
+                        )
+                        yield ExtractedString(
+                            text=text,
+                            context=context,
+                            source_file=str(file_path.relative_to(file_path.parents[2])),
+                            line_number=line_num,
+                            original_line=line.strip(),
+                        )
+        except Exception:
+            pass
 
     def _detect_ui_surface(self, file_path: Path) -> Optional[str]:
         """Detect UI surface from file path."""
@@ -203,6 +354,82 @@ class JSONExtractor:
                         line_number=0,
                         original_line="",
                     )
+            
+            # Enhanced: Extract from custom fields and nested structures
+            yield from self._extract_custom_fields(item, doctype, file_path, layer)
+            yield from self._extract_nested_structures(item, doctype, file_path, layer)
+    
+    def _extract_custom_fields(
+        self, item: dict, doctype: str, file_path: Path, layer: str
+    ) -> Iterator[ExtractedString]:
+        """Extract from custom fields."""
+        # Look for custom_fields array
+        custom_fields = item.get("custom_fields", [])
+        for field in custom_fields:
+            if isinstance(field, dict):
+                # Extract label and description from custom fields
+                for field_name in ["label", "description", "default"]:
+                    value = field.get(field_name)
+                    if isinstance(value, str) and value.strip():
+                        context = TranslationContext(
+                            layer=layer,
+                            app=self.app_name,
+                            doctype=doctype,
+                            fieldname=f"custom_field.{field.get('fieldname', 'unknown')}.{field_name}",
+                            data_nature="label" if field_name in ("label", "description") else "metadata",
+                            intent="user-facing",
+                        )
+                        yield ExtractedString(
+                            text=value,
+                            context=context,
+                            source_file=str(file_path.relative_to(file_path.parents[2])),
+                            line_number=0,
+                            original_line="",
+                        )
+    
+    def _extract_nested_structures(
+        self, item: dict, doctype: str, file_path: Path, layer: str
+    ) -> Iterator[ExtractedString]:
+        """Extract from nested structures (e.g., fields array in DocType)."""
+        # Look for fields array in DocType
+        if doctype == "DocType" and "fields" in item:
+            fields = item.get("fields", [])
+            for field in fields:
+                if isinstance(field, dict):
+                    # Extract label, description, options, etc.
+                    for field_name in ["label", "description", "options"]:
+                        value = field.get(field_name)
+                        if isinstance(value, str) and value.strip():
+                            # Skip if it looks like code or identifier
+                            if self._is_code_or_identifier(value):
+                                continue
+                            
+                            context = TranslationContext(
+                                layer=layer,
+                                app=self.app_name,
+                                doctype=doctype,
+                                fieldname=f"field.{field.get('fieldname', 'unknown')}.{field_name}",
+                                data_nature="label" if field_name in ("label", "description") else "metadata",
+                                intent="user-facing",
+                            )
+                            yield ExtractedString(
+                                text=value,
+                                context=context,
+                                source_file=str(file_path.relative_to(file_path.parents[2])),
+                                line_number=0,
+                                original_line="",
+                            )
+    
+    def _is_code_or_identifier(self, text: str) -> bool:
+        """Check if text looks like code or identifier (should not be translated)."""
+        if not text:
+            return True
+        # Check for common identifier patterns
+        if re.match(r'^[a-z_][a-z0-9_]*$', text) and len(text) < 50:
+            return True
+        if re.match(r'^[A-Z_][A-Z0-9_]*$', text) and len(text) > 1:
+            return True
+        return False
 
     def find_fixture_files(self, app_path: Path) -> Iterator[Path]:
         """
