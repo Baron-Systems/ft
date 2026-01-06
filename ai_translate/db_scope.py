@@ -79,7 +79,7 @@ class DBExtractor:
         ),
     ]
 
-    def __init__(self, frappe_db=None, site: Optional[str] = None):
+    def __init__(self, frappe_db=None, site: Optional[str] = None, bench_path=None):
         """
         Initialize DB extractor.
 
@@ -89,7 +89,42 @@ class DBExtractor:
         """
         self.frappe_db = frappe_db
         self.site = site
+        self.bench_path = bench_path
         self._frappe_initialized = False
+
+    def _find_site_packages_dir(self) -> Optional[str]:
+        """Find bench env site-packages to import frappe when running outside bench python."""
+        try:
+            if not self.bench_path:
+                return None
+            lib = self.bench_path / "env" / "lib"
+            if not lib.exists():
+                return None
+            for p in lib.glob("python*/site-packages"):
+                if p.exists():
+                    return str(p)
+        except Exception:
+            return None
+        return None
+
+    def _patch_sys_path_for_bench(self):
+        """Add bench python paths so `import frappe` works from a global venv/pipx."""
+        try:
+            import sys
+
+            if not self.bench_path:
+                return
+            sp = self._find_site_packages_dir()
+            if sp and sp not in sys.path:
+                sys.path.insert(0, sp)
+            apps_dir = str(self.bench_path / "apps")
+            if apps_dir not in sys.path:
+                sys.path.insert(0, apps_dir)
+            frappe_pkg = str(self.bench_path / "apps" / "frappe")
+            if frappe_pkg not in sys.path:
+                sys.path.insert(0, frappe_pkg)
+        except Exception:
+            pass
 
     def get_scopes_for_layers(self, layers: List[str]) -> List[DBExtractionScope]:
         """
@@ -118,6 +153,7 @@ class DBExtractor:
             return
         
         try:
+            self._patch_sys_path_for_bench()
             import frappe
             
             # Initialize Frappe if not already initialized
@@ -150,6 +186,55 @@ class DBExtractor:
         except Exception:
             # Connection failed, continue without DB extraction
             pass
+
+    def extract_messages_for_app(self, app_name: str, site: Optional[str] = None) -> Iterator[ExtractedString]:
+        """
+        Extract translatable UI messages for an app using frappe.translate.get_messages_for_app.
+        This is the most complete way to get user-visible strings when frappe is available.
+        """
+        site = site or self.site
+        if not site:
+            return
+        self._ensure_connection(site)
+        try:
+            import frappe
+            if not frappe.db:
+                return
+            try:
+                from frappe.translate import get_messages_for_app  # type: ignore
+            except Exception:
+                return
+
+            messages = get_messages_for_app(app_name, deduplicate=True)
+            for msg in messages:
+                if isinstance(msg, tuple):
+                    text = msg[1] if len(msg) >= 2 and msg[1] else msg[0]
+                else:
+                    text = msg
+                if not isinstance(text, str):
+                    continue
+                text = text.strip()
+                if not text or len(text) <= 1:
+                    continue
+                if text.startswith("eval:") or text.startswith("fa-") or "icon" in text.lower():
+                    continue
+
+                context = TranslationContext(
+                    layer="B",
+                    app=app_name,
+                    ui_surface="messages",
+                    data_nature="label",
+                    intent="user-facing",
+                )
+                yield ExtractedString(
+                    text=text,
+                    context=context,
+                    source_file=f"db:messages:{app_name}",
+                    line_number=0,
+                    original_line=text,
+                )
+        except Exception:
+            return
 
     def extract_from_doctype(
         self, scope: DBExtractionScope, site: Optional[str] = None

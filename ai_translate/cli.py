@@ -486,6 +486,17 @@ def _translate_impl(
             return True
         return False
 
+    # Load frappe core translations as a read-only fallback (legacy script behavior)
+    frappe_storage = None
+    try:
+        frappe_app_path = bench_manager.get_app_path("frappe")
+        if frappe_app_path:
+            frappe_translations_path = frappe_app_path / "frappe" / "translations"
+            if frappe_translations_path.exists():
+                frappe_storage = TranslationStorage(storage_path=frappe_translations_path, lang=lang)
+    except Exception:
+        frappe_storage = None
+
     for app_name in app_names:
         app_path = bench_manager.get_app_path(app_name)
         if not app_path:
@@ -512,7 +523,7 @@ def _translate_impl(
 
         # Layers B & C: Database
         if {"B", "C"} & set(layer_list):
-            db_extractor = DBExtractor()
+            db_extractor = DBExtractor(bench_path=bench_manager.bench_path, site=site)
             if doc_types_allowlist:
                 # Filter scopes by allowlist
                 scopes = db_extractor.get_scopes_for_layers(layer_list)
@@ -524,9 +535,18 @@ def _translate_impl(
                 db_extracted = list(
                     db_extractor.extract_all(layers=layer_list, site=site)
                 )
-            # Convert DB extracted to ExtractedString format
-            # TODO: Proper conversion when DB extraction is fully implemented
+            # DBExtractor already yields ExtractedString objects; include them in the pipeline
+            app_extracted.extend(db_extracted)
             output.info(f"Extracted {len(db_extracted)} strings from Layers B/C")
+
+            # Additionally extract app UI messages via frappe.translate.get_messages_for_app (legacy behavior)
+            try:
+                msg_extracted = list(db_extractor.extract_messages_for_app(app_name, site=site))
+                if msg_extracted:
+                    app_extracted.extend(msg_extracted)
+                    output.info(f"Extracted {len(msg_extracted)} strings from app messages (get_messages_for_app)")
+            except Exception:
+                pass
 
         # Filter and translate for this app only
         output.info(f"Total extracted for {app_name}: {len(app_extracted)}")
@@ -544,6 +564,10 @@ def _translate_impl(
                 if existing_entry and repair_existing:
                     # Only retranslate clearly corrupted existing entries
                     if not _should_repair_existing(extracted.text, existing_entry.translated_text):
+                        continue
+                # If not present in app translations, also respect frappe core translations
+                if not existing_entry and not repair_existing and frappe_storage:
+                    if frappe_storage.get(extracted.text):
                         continue
                 # Translate missing strings OR ones selected for repair
                 to_translate.append(extracted)

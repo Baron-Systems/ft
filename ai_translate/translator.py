@@ -1,8 +1,9 @@
 """Groq API integration for translation."""
 
 import os
+import re
 import time
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 try:
     from groq import Groq  # type: ignore
@@ -48,15 +49,22 @@ class Translator:
         self.models = [
             "llama-3.3-70b-versatile",  # Latest versatile model
             "llama-3.1-8b-instant",     # Fast alternative
-            "mixtral-8x7b-32768",        # Alternative model
         ]
         self.current_model_index = 0
+        self.disabled_models: set[str] = set()
         self.stats = {
             "translated": 0,
             "failed": 0,
             "skipped": 0,
             "rejected": 0,
         }
+
+    def _model_trial_indices(self) -> list[int]:
+        """Try all models with wrap-around, starting from last known-good model."""
+        if not self.models:
+            return []
+        start = min(max(self.current_model_index, 0), len(self.models) - 1)
+        return list(range(start, len(self.models))) + list(range(0, start))
 
     def translate(
         self,
@@ -92,13 +100,16 @@ class Translator:
             self.stats["skipped"] += 1
             return text, "skipped"
 
-        # Prepare prompt
-        prompt = self._build_prompt(text, target_lang, source_lang, context)
+        # Mask placeholders before sending to the model (legacy script behavior)
+        masked_text, placeholder_map = self._mask_placeholders(text)
+        prompt = self._build_prompt(masked_text, target_lang, source_lang, context)
 
         # Try models in order until one works
         last_error = None
-        for model_index in range(self.current_model_index, len(self.models)):
+        for model_index in self._model_trial_indices():
             model = self.models[model_index]
+            if model in self.disabled_models:
+                continue
             try:
                 # Call Groq API
                 response = self.client.chat.completions.create(
@@ -145,6 +156,13 @@ class Translator:
                 # Final cleanup: remove any remaining instruction markers
                 translated = translated.replace('Translation:', '').replace('ترجمة:', '').strip()
 
+                # Restore placeholders
+                translated = self._restore_placeholders(translated, placeholder_map)
+                # If any placeholder tokens remain, reject
+                if "__PH_" in translated:
+                    self.stats["rejected"] += 1
+                    return None, "rejected"
+
                 # Guardrail: reject obviously wrong-language outputs (e.g., Chinese when target is Arabic)
                 if self._fails_language_guard(translated, target_lang):
                     self.stats["rejected"] += 1
@@ -168,18 +186,13 @@ class Translator:
                 
                 # Check if model is decommissioned or invalid
                 if "decommissioned" in error_str.lower() or "invalid" in error_str.lower() or "not found" in error_str.lower():
-                    # Try next model
-                    if model_index < len(self.models) - 1:
-                        self.output.warning(f"Model {model} not available, trying next model...", verbose_only=True)
-                        continue
-                
-                # If it's a different error and we haven't tried all models, try next
-                if model_index < len(self.models) - 1:
-                    self.output.warning(f"Error with model {model}, trying next model...", verbose_only=True)
+                    self.disabled_models.add(model)
+                    self.output.warning(f"Model {model} not available, trying next model...", verbose_only=True)
                     continue
                 
-                # All models failed
-                break
+                # Different error: try next model
+                self.output.warning(f"Error with model {model}, trying next model...", verbose_only=True)
+                continue
         
         # All models failed
         self.stats["failed"] += 1
@@ -224,9 +237,7 @@ class Translator:
             batch = texts[i : i + batch_size]
             
             # Try batch translation first
-            batch_results = self._translate_batch_internal(
-                batch, target_lang, source_lang, context
-            )
+            batch_results = self._translate_batch_internal(batch, target_lang, source_lang, context)
             
             # If batch translation failed, fallback to individual
             if batch_results is None:
@@ -260,13 +271,23 @@ class Translator:
         Returns None if batch translation fails (should fallback to individual).
         """
         try:
+            # Mask placeholders per-text before batching (legacy behavior)
+            masked_texts: List[str] = []
+            placeholder_maps: List[Dict[str, str]] = []
+            for t in texts:
+                mt, mp = self._mask_placeholders(t)
+                masked_texts.append(mt)
+                placeholder_maps.append(mp)
+
             # Build batch prompt
-            prompt = self._build_batch_prompt(texts, target_lang, source_lang, context)
+            prompt = self._build_batch_prompt(masked_texts, target_lang, source_lang, context)
             
             # Try models in order
             last_error = None
-            for model_index in range(self.current_model_index, len(self.models)):
+            for model_index in self._model_trial_indices():
                 model = self.models[model_index]
+                if model in self.disabled_models:
+                    continue
                 try:
                     # Call Groq API
                     response = self.client.chat.completions.create(
@@ -285,14 +306,23 @@ class Translator:
                     translated_text = response.choices[0].message.content.strip()
                     
                     # Parse batch response
-                    parsed_results = self._parse_batch_response(
-                        translated_text, texts, target_lang
-                    )
+                    parsed_results = self._parse_batch_response(translated_text, texts, target_lang)
                     
                     if parsed_results:
+                        # Restore placeholders per item
+                        restored: List[Tuple[Optional[str], str]] = []
+                        for i, (tr, st) in enumerate(parsed_results):
+                            if tr and st == "ok":
+                                rt = self._restore_placeholders(tr, placeholder_maps[i])
+                                if "__PH_" in rt:
+                                    restored.append((None, "rejected"))
+                                    continue
+                                restored.append((rt, "ok"))
+                            else:
+                                restored.append((tr, st))
                         # Success - update model index
                         self.current_model_index = model_index
-                        return parsed_results
+                        return restored
                     
                 except Exception as e:
                     last_error = e
@@ -300,16 +330,13 @@ class Translator:
                     
                     # Check if model is decommissioned or invalid
                     if "decommissioned" in error_str.lower() or "invalid" in error_str.lower() or "not found" in error_str.lower():
-                        if model_index < len(self.models) - 1:
-                            self.output.warning(f"Model {model} not available, trying next model...", verbose_only=True)
-                            continue
-                    
-                    # If it's a different error and we haven't tried all models, try next
-                    if model_index < len(self.models) - 1:
-                        self.output.warning(f"Error with model {model}, trying next model...", verbose_only=True)
+                        self.disabled_models.add(model)
+                        self.output.warning(f"Model {model} not available, trying next model...", verbose_only=True)
                         continue
                     
-                    break
+                    # Different error: try next model
+                    self.output.warning(f"Error with model {model}, trying next model...", verbose_only=True)
+                    continue
             
             # All models failed
             return None
@@ -345,6 +372,34 @@ Text: {text}
 
 Translation:"""
         return prompt
+
+    def _mask_placeholders(self, text: str) -> Tuple[str, Dict[str, str]]:
+        """
+        Replace placeholders with stable tokens to reduce model corruption.
+        Covers: {..}, %(name)s, %s/%d, {{ var }}.
+        """
+        s = text or ""
+        placeholder_map: Dict[str, str] = {}
+        patterns = [
+            (r"\{\{[^}]+\}\}", "PH_JINJA"),
+            (r"%\([^)]+\)s", "PH_PERCENT_NAMED"),
+            (r"%[sd]", "PH_PERCENT_SIMPLE"),
+            (r"(?<!\{)\{[^{}]*\}(?!\})", "PH_BRACE"),
+        ]
+        c = 0
+        for pattern, prefix in patterns:
+            for m in list(re.finditer(pattern, s))[::-1]:
+                token = f"__{prefix}_{c}__"
+                placeholder_map[token] = m.group(0)
+                s = s[: m.start()] + token + s[m.end() :]
+                c += 1
+        return s, placeholder_map
+
+    def _restore_placeholders(self, text: str, placeholder_map: Dict[str, str]) -> str:
+        out = text or ""
+        for token, value in placeholder_map.items():
+            out = out.replace(token, value)
+        return out
 
     def _fails_language_guard(self, translated: str, target_lang: str) -> bool:
         """
