@@ -4,7 +4,10 @@ import os
 import time
 from typing import List, Optional, Tuple
 
-from groq import Groq
+try:
+    from groq import Groq  # type: ignore
+except Exception:  # pragma: no cover
+    Groq = None  # type: ignore
 
 from ai_translate.output import OutputFilter
 from ai_translate.policy import PolicyEngine
@@ -32,6 +35,11 @@ class Translator:
         self.api_key = api_key or os.getenv("GROQ_API_KEY")
         if not self.api_key:
             raise ValueError("GROQ_API_KEY environment variable is required")
+
+        if Groq is None:
+            raise ImportError(
+                "Missing dependency 'groq'. Install it (e.g. `pip install groq`) or reinstall ai-translate with its dependencies."
+            )
 
         self.client = Groq(api_key=self.api_key)
         self.policy = PolicyEngine()
