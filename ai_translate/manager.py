@@ -25,22 +25,85 @@ class BenchManager:
         self.apps_path = self.bench_path / "apps" if self.bench_path else None
         self.sites_path = self.bench_path / "sites" if self.bench_path else None
 
+    def _find_frappe_manager_benches(self) -> List[Path]:
+        """
+        Find benches using Frappe Manager (fm).
+
+        Returns:
+            List of bench paths found via fm
+        """
+        benches = []
+        try:
+            # Try to run 'fm bench list'
+            result = subprocess.run(
+                ["fm", "bench", "list"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                # Parse output: format is usually "bench-name -> /path/to/bench"
+                for line in result.stdout.splitlines():
+                    if "->" in line:
+                        parts = line.split("->")
+                        if len(parts) == 2:
+                            bench_path = Path(parts[1].strip())
+                            if bench_path.exists() and (bench_path / "sites").exists():
+                                benches.append(bench_path)
+                                self.output.info(f"Found Frappe Manager bench: {bench_path}", verbose_only=True)
+        except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+            # fm command not found or failed - that's okay
+            self.output.info("Frappe Manager (fm) not available", verbose_only=True)
+        return benches
+
     def _find_bench_path(self, bench_path: Optional[str]) -> Optional[Path]:
-        """Find bench path."""
+        """
+        Find bench path with Frappe Manager support.
+
+        Args:
+            bench_path: Explicit bench path (if provided)
+
+        Returns:
+            Bench path or None
+        """
+        # 1. Use explicit path if provided
         if bench_path:
             path = Path(bench_path).resolve()
             if path.exists() and (path / "sites").exists():
+                self.output.info(f"Using provided bench path: {path}", verbose_only=True)
                 return path
+            else:
+                self.output.warning(f"Provided bench path not found or invalid: {bench_path}")
 
-        # Try current directory
+        # 2. Try Frappe Manager benches
+        fm_benches = self._find_frappe_manager_benches()
+        if fm_benches:
+            # Use the first bench found (or could prompt user)
+            self.output.info(f"Using Frappe Manager bench: {fm_benches[0]}", verbose_only=True)
+            return fm_benches[0]
+
+        # 3. Try current directory
         cwd = Path.cwd()
         if (cwd / "sites").exists():
+            self.output.info(f"Using current directory as bench: {cwd}", verbose_only=True)
             return cwd
 
-        # Try parent directories
+        # 4. Try parent directories
         for parent in cwd.parents:
             if (parent / "sites").exists():
+                self.output.info(f"Found bench in parent directory: {parent}", verbose_only=True)
                 return parent
+
+        # 5. Try common Frappe Manager locations
+        common_paths = [
+            Path.home() / "frappe-bench",
+            Path("/home/frappe/frappe-bench"),
+            Path("/opt/frappe/frappe-bench"),
+        ]
+        for path in common_paths:
+            if path.exists() and (path / "sites").exists():
+                self.output.info(f"Found bench in common location: {path}", verbose_only=True)
+                return path
 
         return None
 

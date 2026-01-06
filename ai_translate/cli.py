@@ -1,6 +1,7 @@
 """CLI entrypoint for ai-translate."""
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -121,6 +122,14 @@ def main(
     bench_manager = BenchManager(bench_path=bench_path, output=output)
     if not bench_manager.bench_path:
         output.error("Could not find bench directory")
+        output.info("")
+        output.info("Tips:")
+        output.info("  1. Use --bench-path to specify the bench directory explicitly")
+        output.info("  2. If using Frappe Manager, run: fm bench list")
+        output.info("  3. Navigate to the bench directory and run the command from there")
+        output.info("")
+        output.info("Example:")
+        output.info("  ai-translate --bench-path /path/to/bench --apps frappe --lang ar --site site-name")
         sys.exit(1)
 
     output.info(f"Bench path: {bench_manager.bench_path}")
@@ -290,6 +299,79 @@ def main(
 
     if dry_run:
         output.info("Dry run complete - no changes made")
+
+
+@app.command(name="list-benches")
+def list_benches(
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        help="Verbose output",
+    ),
+):
+    """
+    List available benches (including Frappe Manager benches).
+    """
+    output = OutputFilter(verbose=verbose)
+    output.info("Searching for benches...")
+    
+    benches_found = []
+    
+    # Try Frappe Manager
+    try:
+        result = subprocess.run(
+            ["fm", "bench", "list"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            output.success("Frappe Manager benches found:")
+            for line in result.stdout.splitlines():
+                if "->" in line:
+                    parts = line.split("->")
+                    if len(parts) == 2:
+                        bench_name = parts[0].strip()
+                        bench_path = Path(parts[1].strip())
+                        if bench_path.exists() and (bench_path / "sites").exists():
+                            benches_found.append((bench_name, bench_path))
+                            output.info(f"  {bench_name} -> {bench_path}")
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        output.info("Frappe Manager (fm) not available")
+    except Exception as e:
+        output.warning(f"Error checking Frappe Manager: {e}")
+    
+    # Check current directory
+    cwd = Path.cwd()
+    if (cwd / "sites").exists():
+        benches_found.append(("current directory", cwd))
+        output.info(f"\nCurrent directory is a bench: {cwd}")
+    
+    # Check common locations
+    common_paths = [
+        ("~/.local/share/frappe-bench", Path.home() / ".local" / "share" / "frappe-bench"),
+        ("~/frappe-bench", Path.home() / "frappe-bench"),
+        ("/home/frappe/frappe-bench", Path("/home/frappe/frappe-bench")),
+        ("/opt/frappe/frappe-bench", Path("/opt/frappe/frappe-bench")),
+    ]
+    
+    found_common = False
+    for name, path in common_paths:
+        if path.exists() and (path / "sites").exists():
+            if not any(bp == path for _, bp in benches_found):
+                benches_found.append((name, path))
+                if not found_common:
+                    output.info("\nOther benches found:")
+                    found_common = True
+                output.info(f"  {name} -> {path}")
+    
+    if not benches_found:
+        output.warning("No benches found")
+        output.info("\nTo use a bench, specify it with --bench-path:")
+        output.info("  ai-translate --bench-path /path/to/bench --apps frappe --lang ar --site site-name")
+    else:
+        output.success(f"\nFound {len(benches_found)} bench(es)")
+        output.info("\nUse --bench-path to specify which bench to use")
 
 
 def cli_entrypoint():

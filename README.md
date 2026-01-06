@@ -4,19 +4,31 @@ AI-powered translation system for Frappe / ERPNext.
 
 ## Installation
 
-Install via pipx:
+**Note:** The tool does NOT need to be installed inside your bench directory. Install it globally, then use `--bench-path` to point to your bench.
+
+### Install via pipx (Recommended):
 
 ```bash
 pipx install git+https://github.com/Baron-Systems/ft.git
 ```
 
-Or install from source:
+### Install from source:
 
 ```bash
 git clone https://github.com/Baron-Systems/ft.git
 cd ft
 pip install -e .
 ```
+
+### For Frappe Manager Users:
+
+The tool now has **built-in support for Frappe Manager (fm)**:
+
+- Automatically detects benches via `fm bench list`
+- No need to specify `--bench-path` if using Frappe Manager
+- Use `ai-translate list-benches` to see all available benches
+
+See [INSTALLATION_FM.md](INSTALLATION_FM.md) for detailed instructions.
 
 ## Requirements
 

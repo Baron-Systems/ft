@@ -68,6 +68,12 @@ ai-translate --apps frappe --lang es --site your-site-name --dry-run --verbose
 ai-translate --all-apps --lang fr --site your-site-name
 ```
 
+## Frappe Manager Users
+
+If you're using **Frappe Manager (fm)**, see [INSTALLATION_FM.md](INSTALLATION_FM.md) for specific instructions.
+
+**Important:** The tool does NOT need to be installed inside the bench directory. Install it globally with pipx, then use `--bench-path` to point to your bench.
+
 ## Troubleshooting
 
 ### Command not found
@@ -98,5 +104,15 @@ If empty, set it as described above.
 Use `--bench-path` to specify the bench directory:
 ```bash
 ai-translate --bench-path /path/to/bench --apps frappe --lang es --site your-site-name
+```
+
+### Finding Bench Path (Frappe Manager)
+
+```bash
+# List benches
+fm bench list
+
+# Or search for bench directory
+find /home -name "sites" -type d 2>/dev/null | grep -E "(frappe-bench|bench)"
 ```
 
