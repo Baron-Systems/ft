@@ -81,13 +81,19 @@ class BenchManager:
                                     # Bench path: /home/baron/frappe-bench (or /home/baron/frappe)
                                     if site_path.name == "sites" or "sites" in str(site_path):
                                         # Go up to find bench directory
-                                        potential_bench = site_path.parent
-                                        if (potential_bench / "sites").exists():
+                                        potential_bench = site_path.parent  # /home/baron/frappe
+                                        if (potential_bench / "sites").exists() and (potential_bench / "apps").exists():
                                             benches_set.add(potential_bench.resolve())
+                                        # Try frappe-bench pattern
+                                        bench_name = potential_bench.name
+                                        if bench_name == "frappe":
+                                            potential_bench2 = potential_bench.parent / "frappe-bench"  # /home/baron/frappe-bench
+                                            if potential_bench2.exists() and (potential_bench2 / "sites").exists() and (potential_bench2 / "apps").exists():
+                                                benches_set.add(potential_bench2.resolve())
                                         # Also check if parent is bench
-                                        potential_bench2 = potential_bench.parent
-                                        if (potential_bench2 / "sites").exists():
-                                            benches_set.add(potential_bench2.resolve())
+                                        potential_bench3 = potential_bench.parent
+                                        if (potential_bench3 / "sites").exists() and (potential_bench3 / "apps").exists():
+                                            benches_set.add(potential_bench3.resolve())
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
         except Exception:
@@ -95,7 +101,7 @@ class BenchManager:
         
         # Convert set to list and validate
         for bench_path in benches_set:
-            if bench_path.exists() and (bench_path / "sites").exists():
+            if bench_path.exists() and (bench_path / "sites").exists() and (bench_path / "apps").exists():
                 benches.append(bench_path)
                 self.output.info(f"Found Frappe Manager bench: {bench_path}", verbose_only=True)
         
@@ -114,11 +120,19 @@ class BenchManager:
         # 1. Use explicit path if provided
         if bench_path:
             path = Path(bench_path).resolve()
-            if path.exists() and (path / "sites").exists():
+            if path.exists() and (path / "sites").exists() and (path / "apps").exists():
                 self.output.info(f"Using provided bench path: {path}", verbose_only=True)
                 return path
             else:
                 self.output.warning(f"Provided bench path not found or invalid: {bench_path}")
+                if path.exists():
+                    missing = []
+                    if not (path / "sites").exists():
+                        missing.append("sites")
+                    if not (path / "apps").exists():
+                        missing.append("apps")
+                    if missing:
+                        self.output.warning(f"Missing directories: {', '.join(missing)}")
 
         # 2. Try Frappe Manager benches
         fm_benches = self._find_frappe_manager_benches()
@@ -129,13 +143,13 @@ class BenchManager:
 
         # 3. Try current directory
         cwd = Path.cwd()
-        if (cwd / "sites").exists():
+        if (cwd / "sites").exists() and (cwd / "apps").exists():
             self.output.info(f"Using current directory as bench: {cwd}", verbose_only=True)
             return cwd
 
         # 4. Try parent directories
         for parent in cwd.parents:
-            if (parent / "sites").exists():
+            if (parent / "sites").exists() and (parent / "apps").exists():
                 self.output.info(f"Found bench in parent directory: {parent}", verbose_only=True)
                 return parent
 
@@ -156,11 +170,26 @@ class BenchManager:
                             if "/sites/" in part:
                                 site_path = Path(part.strip())
                                 if site_path.exists():
-                                    # Try parent directories
-                                    for parent in [site_path.parent, site_path.parent.parent]:
-                                        if (parent / "sites").exists() and (parent / "apps").exists():
-                                            self.output.info(f"Found bench from Frappe Manager site: {parent}", verbose_only=True)
-                                            return parent.resolve()
+                                    # Try parent directories - go up to find bench
+                                    # Site path: /home/baron/frappe/sites/site-name
+                                    # Try: /home/baron/frappe (if it has apps)
+                                    # Try: /home/baron/frappe-bench (common pattern)
+                                    potential_bench = site_path.parent  # /home/baron/frappe
+                                    if (potential_bench / "sites").exists() and (potential_bench / "apps").exists():
+                                        self.output.info(f"Found bench from Frappe Manager site: {potential_bench}", verbose_only=True)
+                                        return potential_bench.resolve()
+                                    # Try frappe-bench pattern
+                                    bench_name = potential_bench.name  # "frappe"
+                                    if bench_name == "frappe":
+                                        potential_bench2 = potential_bench.parent / "frappe-bench"  # /home/baron/frappe-bench
+                                        if potential_bench2.exists() and (potential_bench2 / "sites").exists() and (potential_bench2 / "apps").exists():
+                                            self.output.info(f"Found bench from Frappe Manager (frappe-bench pattern): {potential_bench2}", verbose_only=True)
+                                            return potential_bench2.resolve()
+                                    # Try parent's parent
+                                    potential_bench3 = potential_bench.parent
+                                    if (potential_bench3 / "sites").exists() and (potential_bench3 / "apps").exists():
+                                        self.output.info(f"Found bench from Frappe Manager site (parent): {potential_bench3}", verbose_only=True)
+                                        return potential_bench3.resolve()
         except Exception:
             pass
         
@@ -174,7 +203,7 @@ class BenchManager:
             Path("/opt/frappe/frappe"),
         ]
         for path in common_paths:
-            if path.exists() and (path / "sites").exists():
+            if path.exists() and (path / "sites").exists() and (path / "apps").exists():
                 self.output.info(f"Found bench in common location: {path}", verbose_only=True)
                 return path
 
