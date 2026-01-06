@@ -42,6 +42,7 @@ def cli():
 @click.option('--db-scope', is_flag=True, help='Include database content (Layers B & C)')
 @click.option('--db-scope-only', is_flag=True, help='Only process database content (skip Layer A)')
 @click.option('--db-doc-types', help='Comma-separated allowlist of DocTypes to extract')
+@click.option('--repair-existing', is_flag=True, help='Re-translate clearly corrupted existing translations (wrong script / placeholder corruption)')
 @click.option('--verbose', '-v', is_flag=True, help='Verbose output')
 @click.option('--slow-mode', is_flag=True, help='Enable slow mode (rate limiting)')
 @click.option('--dry-run', is_flag=True, help='Dry run mode (no writes)')
@@ -53,6 +54,7 @@ def translate(
     db_scope: bool,
     db_scope_only: bool,
     db_doc_types: Optional[str],
+    repair_existing: bool,
     verbose: bool,
     slow_mode: bool,
     dry_run: bool,
@@ -79,6 +81,7 @@ def translate(
         db_scope=db_scope,
         db_scope_only=db_scope_only,
         db_doc_types=db_doc_types,
+        repair_existing=repair_existing,
         verbose=verbose,
         slow_mode=slow_mode,
         dry_run=dry_run,
@@ -369,6 +372,7 @@ def _translate_impl(
     db_scope: bool,
     db_scope_only: bool,
     db_doc_types: Optional[str],
+    repair_existing: bool,
     verbose: bool,
     slow_mode: bool,
     dry_run: bool,
@@ -458,6 +462,30 @@ def _translate_impl(
     # Process each app separately
     all_app_stats = []
 
+    # Create a single PolicyEngine for the whole run so stats are accurate
+    from ai_translate.policy import PolicyEngine
+    policy = PolicyEngine()
+
+    def _contains_cjk(s: str) -> bool:
+        import re
+        return bool(re.search(r"[\u4E00-\u9FFF\u3400-\u4DBF\u3040-\u30FF]", s or ""))
+
+    def _contains_arabic(s: str) -> bool:
+        import re
+        return bool(re.search(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]", s or ""))
+
+    def _should_repair_existing(source_text: str, translated_text: str) -> bool:
+        # Empty translations are always broken
+        if not (translated_text or "").strip():
+            return True
+        # Placeholder corruption (also catches introducing "{ }", "{}" etc)
+        if not policy.validate_placeholders(source_text, translated_text):
+            return True
+        # Wrong script for Arabic target: Chinese/Japanese output with no Arabic letters
+        if (lang or "").strip().lower() == "ar" and _contains_cjk(translated_text) and not _contains_arabic(translated_text):
+            return True
+        return False
+
     for app_name in app_names:
         app_path = bench_manager.get_app_path(app_name)
         if not app_path:
@@ -504,18 +532,21 @@ def _translate_impl(
         output.info(f"Total extracted for {app_name}: {len(app_extracted)}")
 
         # Apply policy and filter
-        from ai_translate.policy import PolicyEngine
-
-        policy = PolicyEngine()
         to_translate = []
 
         for extracted in app_extracted:
             decision, reason = policy.decide(extracted.text, extracted.context)
             if decision.value == "translate":
                 # Check if already translated
-                existing = storage.get(extracted.text, extracted.context)
-                if not existing:  # Only translate if not already translated
-                    to_translate.append(extracted)
+                existing_entry = storage.get_entry_by_source(extracted.text)
+                if existing_entry and not repair_existing:
+                    continue
+                if existing_entry and repair_existing:
+                    # Only retranslate clearly corrupted existing entries
+                    if not _should_repair_existing(extracted.text, existing_entry.translated_text):
+                        continue
+                # Translate missing strings OR ones selected for repair
+                to_translate.append(extracted)
 
         total_to_translate = len(to_translate)
         output.info(f"Strings to translate: {total_to_translate}")
@@ -577,8 +608,6 @@ def _translate_impl(
         all_app_stats.append((app_name, translation_stats, app_extracted))
 
     # Print comprehensive statistics for all apps
-    from ai_translate.policy import PolicyEngine
-    policy = PolicyEngine()
     policy_stats = policy.get_stats()
     
     # Aggregate stats from all apps
@@ -602,9 +631,9 @@ def _translate_impl(
     console.print("[bold green]═══════════════════════════════════════════════════════════[/bold green]\n")
     
     console.print("[bold]Policy Decisions:[/bold]")
-    console.print(f"  ✓ TRANSLATE: [green]{policy_stats.get('TRANSLATE', 0)}[/green]")
-    console.print(f"  ⊘ SKIP: [yellow]{policy_stats.get('SKIP', 0)}[/yellow]")
-    console.print(f"  ⊘ KEEP_ORIGINAL: [yellow]{policy_stats.get('KEEP_ORIGINAL', 0)}[/yellow]\n")
+    console.print(f"  ✓ TRANSLATE: [green]{policy_stats.get('translate', 0)}[/green]")
+    console.print(f"  ⊘ SKIP: [yellow]{policy_stats.get('skip', 0)}[/yellow]")
+    console.print(f"  ⊘ KEEP_ORIGINAL: [yellow]{policy_stats.get('keep_original', 0)}[/yellow]\n")
     
     console.print("[bold]Translation Results:[/bold]")
     console.print(f"  ✓ Translated: [green]{final_stats.get('translated', 0)}[/green]")
@@ -613,7 +642,7 @@ def _translate_impl(
     if final_stats.get('skipped', 0) > 0:
         console.print(f"  ⊘ Skipped: [yellow]{final_stats.get('skipped', 0)}[/yellow]")
     if final_stats.get('rejected', 0) > 0:
-        console.print(f"  ⚠ Rejected (placeholder issues): [yellow]{final_stats.get('rejected', 0)}[/yellow]")
+        console.print(f"  ⚠ Rejected (validation issues): [yellow]{final_stats.get('rejected', 0)}[/yellow]")
         if verbose:
             output.info("Use --verbose to see details of rejected translations", verbose_only=True)
     

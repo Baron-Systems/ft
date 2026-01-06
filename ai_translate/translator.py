@@ -137,6 +137,11 @@ class Translator:
                 # Final cleanup: remove any remaining instruction markers
                 translated = translated.replace('Translation:', '').replace('ترجمة:', '').strip()
 
+                # Guardrail: reject obviously wrong-language outputs (e.g., Chinese when target is Arabic)
+                if self._fails_language_guard(translated, target_lang):
+                    self.stats["rejected"] += 1
+                    return None, "rejected"
+
                 # Validate placeholders
                 if not self.policy.validate_placeholders(text, translated):
                     self.stats["rejected"] += 1
@@ -332,6 +337,23 @@ Text: {text}
 
 Translation:"""
         return prompt
+
+    def _fails_language_guard(self, translated: str, target_lang: str) -> bool:
+        """
+        Heuristic guard against clearly wrong-language outputs.
+        Currently focuses on preventing CJK output when target is Arabic.
+        """
+        lang = (target_lang or "").strip().lower()
+        if lang != "ar":
+            return False
+
+        # Arabic blocks + extended Arabic
+        arabic_chars = len(re.findall(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]", translated))
+        # CJK Unified + Extensions + Hiragana/Katakana (common Chinese/Japanese outputs)
+        cjk_chars = len(re.findall(r"[\u4E00-\u9FFF\u3400-\u4DBF\u3040-\u30FF]", translated))
+
+        # If it contains CJK and essentially no Arabic, it's wrong for --lang ar.
+        return cjk_chars > 0 and arabic_chars == 0
     
     def _build_batch_prompt(
         self,
@@ -396,8 +418,13 @@ Translations (one per line or JSON array):"""
                 if isinstance(parsed, list) and len(parsed) == len(original_texts):
                     for i, trans in enumerate(parsed):
                         if isinstance(trans, str):
-                            # Validate placeholders
-                            if self.policy.validate_placeholders(original_texts[i], trans):
+                            trans = trans.strip()
+                            # Guardrail: wrong-language outputs (e.g., CJK when target is Arabic)
+                            if self._fails_language_guard(trans, target_lang):
+                                results.append((None, "rejected"))
+                                self.stats["rejected"] += 1
+                            # Validate placeholders (also blocks introducing new { } fields)
+                            elif self.policy.validate_placeholders(original_texts[i], trans):
                                 results.append((trans, "ok"))
                                 self.stats["translated"] += 1
                             else:
@@ -428,8 +455,12 @@ Translations (one per line or JSON array):"""
         if len(filtered_lines) >= len(original_texts):
             # Take first N lines
             for i, trans in enumerate(filtered_lines[:len(original_texts)]):
-                # Validate placeholders
-                if self.policy.validate_placeholders(original_texts[i], trans):
+                # Guardrail: wrong-language outputs
+                if self._fails_language_guard(trans, target_lang):
+                    results.append((None, "rejected"))
+                    self.stats["rejected"] += 1
+                # Validate placeholders (also blocks introducing new { } fields)
+                elif self.policy.validate_placeholders(original_texts[i], trans):
                     results.append((trans, "ok"))
                     self.stats["translated"] += 1
                 else:

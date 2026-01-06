@@ -76,6 +76,9 @@ class PolicyEngine:
         re.compile(r'\{\{[^}]+\}\}'),  # {{ var }}
         re.compile(r'%[sd]'),  # %s, %d
     ]
+    _SINGLE_BRACE_FIELD = re.compile(r'(?<!\{)\{[^{}]*\}(?!\})')  # {..} but not {{..}}
+    _SINGLE_OPEN_BRACE = re.compile(r'(?<!\{)\{(?!\{)')
+    _SINGLE_CLOSE_BRACE = re.compile(r'(?<!\})\}(?!\})')
 
     # Enhanced blacklist patterns
     BLACKLIST_PATTERNS = [
@@ -267,21 +270,30 @@ class PolicyEngine:
         Returns:
             True if placeholders are preserved, False otherwise
         """
-        # Extract placeholders from original
-        original_placeholders = []
-        for pattern in self.PLACEHOLDER_PATTERNS:
-            original_placeholders.extend(pattern.findall(original))
+        # Fast fail on unbalanced single braces (common corruption: introducing "{ }")
+        orig_open = len(self._SINGLE_OPEN_BRACE.findall(original))
+        orig_close = len(self._SINGLE_CLOSE_BRACE.findall(original))
+        trans_open = len(self._SINGLE_OPEN_BRACE.findall(translated))
+        trans_close = len(self._SINGLE_CLOSE_BRACE.findall(translated))
+        if orig_open != orig_close:
+            # Original itself is odd; don't block on it
+            pass
+        else:
+            if trans_open != trans_close:
+                return False
 
-        # Extract placeholders from translated
-        translated_placeholders = []
-        for pattern in self.PLACEHOLDER_PATTERNS:
-            translated_placeholders.extend(pattern.findall(translated))
+        def _extract_tokens(text: str) -> list[str]:
+            tokens: list[str] = []
+            # Named/standard printf placeholders and jinja placeholders
+            for pattern in self.PLACEHOLDER_PATTERNS:
+                tokens.extend(pattern.findall(text))
+            # Any single-brace python format fields: catches {0}, {name}, {} , { }
+            tokens.extend(self._SINGLE_BRACE_FIELD.findall(text))
+            tokens.sort()
+            return tokens
 
-        # Sort for comparison
-        original_placeholders.sort()
-        translated_placeholders.sort()
-
-        return original_placeholders == translated_placeholders
+        # Compare tokens exactly: preserves both presence and multiplicity
+        return _extract_tokens(original) == _extract_tokens(translated)
 
     def get_stats(self) -> dict:
         """Get decision statistics."""
