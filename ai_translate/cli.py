@@ -60,6 +60,7 @@ def cli():
 @click.option('--site', '-s', help='Site name (required for Layers B & C)')
 @click.option('--context', '-c', help='App description/context (improves meaning-based translations)')
 @click.option('--bench-path', '-b', help='Path to bench directory')
+@click.option('--no-gettext', is_flag=True, hidden=True, help='Skip PO/MO sync (advanced)')
 @click.option('--db-scope', is_flag=True, hidden=True, help='Include database content (Layers B & C) (advanced)')
 @click.option('--db-scope-only', is_flag=True, hidden=True, help='Only process database content (skip Layer A) (advanced)')
 @click.option('--db-doc-types', hidden=True, help='Comma-separated allowlist of DocTypes to extract (advanced)')
@@ -73,6 +74,7 @@ def translate(
     site: Optional[str],
     context: Optional[str],
     bench_path: Optional[str],
+    no_gettext: bool,
     db_scope: bool,
     db_scope_only: bool,
     db_doc_types: Optional[str],
@@ -100,6 +102,7 @@ def translate(
         site=site,
         context=context,
         bench_path=bench_path,
+        no_gettext=no_gettext,
         db_scope=db_scope,
         db_scope_only=db_scope_only,
         db_doc_types=db_doc_types,
@@ -247,6 +250,7 @@ def list_benches(verbose: bool):
 @click.argument('apps', required=True)
 @click.option('--lang', '-l', required=True, help='Language code to review')
 @click.option('--context', '-c', help='App description/context for better translation')
+@click.option('--site', '-s', help='Optional site name to sync PO/MO after review')
 @click.option('--bench-path', '-b', help='Path to bench directory')
 @click.option('--status', help='Filter by review status (e.g., needs_review)')
 @click.option('--verbose', '-v', is_flag=True, help='Verbose output')
@@ -254,6 +258,7 @@ def review(
     apps: str,
     lang: str,
     context: Optional[str],
+    site: Optional[str],
     bench_path: Optional[str],
     status: Optional[str],
     verbose: bool,
@@ -362,6 +367,16 @@ def review(
         storage.save()
         output.success(f"✓ Reviewed {reviewed_count} translations for {app_name}")
 
+        # Optional: Sync gettext assets for this site
+        if site:
+            locale_path = bench_manager.get_locale_path(site, lang)
+            if locale_path:
+                gs = GettextSync(storage=storage, locale_path=locale_path, output=output)
+                gs.sync_csv_to_po(dry_run=False, merge=True)
+                gs.compile_mo(dry_run=False)
+            else:
+                output.warning(f"Could not determine locale path for site '{site}', skipping PO/MO sync")
+
 
 @cli.command(hidden=True)
 @click.argument('apps', required=True)
@@ -397,6 +412,7 @@ def _translate_impl(
     site: Optional[str],
     context: Optional[str],
     bench_path: Optional[str],
+    no_gettext: bool,
     db_scope: bool,
     db_scope_only: bool,
     db_doc_types: Optional[str],
@@ -661,6 +677,18 @@ def _translate_impl(
             # Save storage for this app
             storage.save()
             output.success(f"✓ Translations saved to: {storage.csv_path}")
+
+            # Professional behavior: Sync gettext assets automatically (PO/MO) when a site is involved.
+            # This keeps `sites/<site>/assets/locale/<lang>/LC_MESSAGES/<lang>.po/.mo` up to date.
+            if site and not no_gettext:
+                locale_path = bench_manager.get_locale_path(site, lang)
+                if locale_path:
+                    gs = GettextSync(storage=storage, locale_path=locale_path, output=output)
+                    ok_po = gs.sync_csv_to_po(dry_run=False, merge=True)
+                    if ok_po:
+                        gs.compile_mo(dry_run=False)
+                else:
+                    output.warning(f"Could not determine locale path for site '{site}', skipping PO/MO sync")
         else:
             output.info("Dry run - no translations saved")
         
