@@ -24,72 +24,80 @@ app = typer.Typer(
     name="ai-translate",
     help="AI-powered translation system for Frappe / ERPNext",
     add_completion=False,
-    no_args_is_help=False,
 )
 console = Console()
 
 
-@app.callback(invoke_without_command=True)
-def main(ctx: typer.Context):
-    """Main callback - handles default translate command."""
-    if ctx.invoked_subcommand is None:
-        # Parse arguments manually from sys.argv
-        import sys
-        args = sys.argv[1:]
+def cli_entrypoint():
+    """CLI entrypoint - parses arguments manually to avoid Typer issues."""
+    import sys
+    args = sys.argv[1:]
+    
+    # Check if this is a subcommand (review, list-benches)
+    if args and args[0] in ["review", "list-benches"]:
+        # Let Typer handle subcommands
+        app()
+        return
+    
+    # Check if this looks like a translate command (has --lang)
+    if "--lang" in args:
+        # Parse arguments manually
+        apps = None
+        lang = None
+        site = None
+        bench_path = None
+        verbose = False
         
-        # Check if this looks like a translate command (has --lang)
-        if "--lang" in args:
-            # Parse arguments manually
-            apps = None
-            lang = None
-            site = None
-            bench_path = None
-            verbose = False
-            
-            i = 0
-            while i < len(args):
-                arg = args[i]
-                if arg == "--lang":
-                    if i + 1 < len(args):
-                        lang = args[i + 1]
-                        i += 2
-                    else:
-                        break
-                elif arg == "--site":
-                    if i + 1 < len(args):
-                        site = args[i + 1]
-                        i += 2
-                    else:
-                        break
-                elif arg == "--bench-path":
-                    if i + 1 < len(args):
-                        bench_path = args[i + 1]
-                        i += 2
-                    else:
-                        break
-                elif arg == "--verbose":
-                    verbose = True
-                    i += 1
-                elif not arg.startswith("-") and arg not in ["review", "list-benches"]:
-                    # This should be the apps argument
-                    apps = arg
-                    i += 1
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            if arg == "--lang":
+                if i + 1 < len(args):
+                    lang = args[i + 1]
+                    i += 2
                 else:
-                    i += 1
-            
-            if apps and lang:
-                _translate_impl(apps=apps, lang=lang, site=site, bench_path=bench_path, verbose=verbose)
+                    break
+            elif arg == "--site":
+                if i + 1 < len(args):
+                    site = args[i + 1]
+                    i += 2
+                else:
+                    break
+            elif arg == "--bench-path":
+                if i + 1 < len(args):
+                    bench_path = args[i + 1]
+                    i += 2
+                else:
+                    break
+            elif arg == "--verbose":
+                verbose = True
+                i += 1
+            elif not arg.startswith("-"):
+                # This should be the apps argument
+                apps = arg
+                i += 1
             else:
-                output = OutputFilter(verbose=verbose)
-                output.error("App name(s) and --lang are required")
-                output.info("\nUsage:")
-                output.info("  ai-translate <apps> --lang <lang> [--site <site>]")
-                output.info("\nExample:")
-                output.info("  ai-translate erpnext --lang ar --site mysite")
-                sys.exit(1)
+                i += 1
+        
+        if apps and lang:
+            _translate_impl(apps=apps, lang=lang, site=site, bench_path=bench_path, verbose=verbose)
         else:
-            # Show help if no --lang found
-            ctx.get_help()
+            output = OutputFilter(verbose=verbose)
+            output.error("App name(s) and --lang are required")
+            output.info("\nUsage:")
+            output.info("  ai-translate <apps> --lang <lang> [--site <site>]")
+            output.info("\nExample:")
+            output.info("  ai-translate erpnext --lang ar --site mysite")
+            sys.exit(1)
+    else:
+        # No --lang found, let Typer show help or handle subcommands
+        app()
+
+
+@app.callback()
+def main(ctx: typer.Context):
+    """Main callback - only handles subcommands."""
+    pass
 
 
 def _translate_impl(
@@ -581,10 +589,7 @@ def review_translations(
         output.success(f"✓ Reviewed {reviewed_count} translations for {app_name}")
 
 
-def cli_entrypoint():
-    """CLI entrypoint for console script."""
-    app()
-
+# cli_entrypoint is defined above (line 31)
 
 # Make app callable for direct execution
 if __name__ == "__main__":
