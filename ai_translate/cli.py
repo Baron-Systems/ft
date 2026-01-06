@@ -282,18 +282,25 @@ def translate(
         db_writer = TranslationDBWriter(
             site=site, update_existing=update_existing, output=output
         )
-        entries = [
-            TranslationEntry(
-                source_text=e.text,
-                translated_text=storage.get(e.text, e.context) or e.text,
-                context=e.context,
-            )
-            for e in all_extracted
-            if storage.get(e.text, e.context)
-        ]
-        db_writer.write_batch(entries, dry_run=dry_run)
-        db_stats = db_writer.get_stats()
-        output.info(f"Database writes: {db_stats}")
+        entries = []
+        for e in all_extracted:
+            translated = storage.get(e.text, e.context)
+            if translated:  # Only add entries with translations
+                entries.append(
+                    TranslationEntry(
+                        source_text=e.text,
+                        translated_text=translated,
+                        context=e.context,
+                        source_file=e.source_file,
+                        line_number=e.line_number,
+                    )
+                )
+        if entries:
+            db_writer.write_batch(entries, dry_run=dry_run)
+            db_stats = db_writer.get_stats()
+            output.info(f"Database writes: {db_stats}")
+        else:
+            output.info("No translations to write to database")
 
     # Print statistics
     policy_stats = policy.get_stats()

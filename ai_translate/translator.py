@@ -98,15 +98,44 @@ class Translator:
                     messages=[
                         {
                             "role": "system",
-                            "content": "You are a professional translator. Translate accurately while preserving placeholders, formatting, and technical terms.",
+                            "content": "You are a professional translator. Return ONLY the translated text, nothing else. Preserve all placeholders exactly.",
                         },
                         {"role": "user", "content": prompt},
                     ],
-                    temperature=0.3,
-                    max_tokens=1000,
+                    temperature=0.2,  # Lower temperature for more consistent output
+                    max_tokens=500,  # Reduce max tokens to prevent verbose responses
                 )
 
                 translated = response.choices[0].message.content.strip()
+                
+                # Clean up: Remove any instruction text that might have been included
+                # Look for common patterns where the model includes instructions
+                lines = translated.split('\n')
+                cleaned_lines = []
+                for line in lines:
+                    line = line.strip()
+                    # Skip lines that look like instructions
+                    if any(keyword in line.lower() for keyword in ['important:', 'rules:', 'preserve', 'do not', 'return', 'translation:', 'نص', 'مهم', 'احفظ', 'لا تترجم']):
+                        # Check if this line contains actual translation content
+                        if not any(keyword in line.lower() for keyword in ['translate', 'ترجمة', 'translation']):
+                            continue
+                    # Skip empty lines at the start
+                    if not cleaned_lines and not line:
+                        continue
+                    cleaned_lines.append(line)
+                
+                # Join and clean
+                translated = '\n'.join(cleaned_lines).strip()
+                
+                # If translation still contains instruction-like text, try to extract just the translation part
+                if 'translation:' in translated.lower() or 'ترجمة' in translated.lower():
+                    # Try to find the actual translation after "Translation:" or similar
+                    parts = translated.split(':', 1)
+                    if len(parts) > 1:
+                        translated = parts[1].strip()
+                
+                # Final cleanup: remove any remaining instruction markers
+                translated = translated.replace('Translation:', '').replace('ترجمة:', '').strip()
 
                 # Validate placeholders
                 if not self.policy.validate_placeholders(text, translated):
@@ -189,15 +218,18 @@ class Translator:
         context: Optional[str],
     ) -> str:
         """Build translation prompt."""
-        prompt = f"Translate the following text from {source_lang} to {target_lang}."
-        if context:
-            prompt += f"\n\nContext: {context}"
-        prompt += "\n\nImportant:"
-        prompt += "\n- Preserve all placeholders exactly (e.g., {0}, %(name)s, {{ var }})"
-        prompt += "\n- Preserve formatting and line breaks"
-        prompt += "\n- Do not translate technical terms, URLs, or email addresses"
-        prompt += "\n- Only return the translated text, nothing else"
-        prompt += f"\n\nText to translate:\n{text}"
+        # Use a cleaner, more direct prompt
+        prompt = f"""Translate the following text from {source_lang} to {target_lang}.
+
+Rules:
+- Preserve ALL placeholders exactly as they appear (e.g., {{0}}, {{1}}, %(name)s, {{{{ var }}}})
+- Keep the same formatting and structure
+- Do NOT translate technical terms, code, URLs, or email addresses
+- Return ONLY the translated text, no explanations, no instructions, no additional text
+
+Text: {text}
+
+Translation:"""
         return prompt
 
     def get_stats(self) -> dict:
