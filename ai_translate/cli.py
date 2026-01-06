@@ -369,7 +369,22 @@ def list_benches(
                 output.success("Frappe Manager sites found (fm list):")
                 # Extract unique bench paths
                 for site_path in site_paths:
-                    # Try to find bench directory
+                    # Frappe Manager structure:
+                    # Site path: /home/baron/frappe/sites/site-name
+                    # Bench path: /home/baron/frappe/sites/site-name/workspace/frappe-bench
+                    
+                    # First, check workspace/frappe-bench pattern (Frappe Manager)
+                    workspace_bench = site_path / "workspace" / "frappe-bench"
+                    if workspace_bench.exists() and (workspace_bench / "sites").exists() and (workspace_bench / "apps").exists():
+                        bench_path = workspace_bench.resolve()
+                        if bench_path not in benches_set:
+                            benches_set.add(bench_path)
+                            site_name = site_path.name
+                            benches_found.append((f"bench (site: {site_name})", bench_path))
+                            output.info(f"  Site: {site_name} -> Bench: {bench_path}")
+                            continue
+                    
+                    # Legacy: Try parent directory (for non-Frappe Manager setups)
                     potential_bench = site_path.parent
                     if (potential_bench / "sites").exists() and (potential_bench / "apps").exists():
                         bench_path = potential_bench.resolve()
@@ -378,6 +393,7 @@ def list_benches(
                             site_name = site_path.name
                             benches_found.append((f"bench (site: {site_name})", bench_path))
                             output.info(f"  Site: {site_name} -> Bench: {bench_path}")
+                    
                     # Also check parent's parent
                     potential_bench2 = potential_bench.parent
                     if (potential_bench2 / "sites").exists() and (potential_bench2 / "apps").exists():
