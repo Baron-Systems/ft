@@ -24,12 +24,13 @@ app = typer.Typer(
     name="ai-translate",
     help="AI-powered translation system for Frappe / ERPNext",
     add_completion=False,
+    invoke_without_command=True,
 )
 console = Console()
 
 
-@app.command()
-def main(
+@app.callback(invoke_without_command=True)
+def translate(
     apps: Optional[str] = typer.Option(
         None,
         "--apps",
