@@ -220,6 +220,13 @@ def translate(
         return
 
     # Translate
+    translation_stats = {
+        "translated": 0,
+        "failed": 0,
+        "skipped": 0,
+        "rejected": 0,
+    }
+    
     if not dry_run:
         consecutive_failures = 0
         max_consecutive_failures = 5  # Stop after 5 consecutive failures
@@ -230,8 +237,10 @@ def translate(
                     extracted.text, lang, source_lang="en"
                 )
                 
+                # Track statistics
                 if status == "ok" and translated:
                     consecutive_failures = 0  # Reset failure counter
+                    translation_stats["translated"] += 1
                     storage.set(
                         extracted.text,
                         translated,
@@ -241,10 +250,15 @@ def translate(
                     )
                 elif status == "failed":
                     consecutive_failures += 1
+                    translation_stats["failed"] += 1
                     if consecutive_failures >= max_consecutive_failures:
                         output.error(f"Stopping translation after {max_consecutive_failures} consecutive failures")
                         output.error("Please check your API key and model availability")
                         break
+                elif status == "skipped":
+                    translation_stats["skipped"] += 1
+                elif status == "rejected":
+                    translation_stats["rejected"] += 1
                 
                 progress.update()
 
@@ -302,20 +316,38 @@ def translate(
         else:
             output.info("No translations to write to database")
 
-    # Print statistics
+    # Print comprehensive statistics
     policy_stats = policy.get_stats()
     trans_stats = translator.get_stats()
+    
+    # Use translation_stats if available (more accurate)
+    final_stats = translation_stats if translation_stats.get("translated", 0) > 0 else trans_stats
 
-    console.print("\n[bold]Translation Statistics:[/bold]")
-    console.print(f"  Policy Decisions:")
-    console.print(f"    TRANSLATE: {policy_stats.get('TRANSLATE', 0)}")
-    console.print(f"    SKIP: {policy_stats.get('SKIP', 0)}")
-    console.print(f"    KEEP_ORIGINAL: {policy_stats.get('KEEP_ORIGINAL', 0)}")
-    console.print(f"  Translation Results:")
-    console.print(f"    Translated: {trans_stats.get('translated', 0)}")
-    console.print(f"    Failed: {trans_stats.get('failed', 0)}")
-    console.print(f"    Skipped: {trans_stats.get('skipped', 0)}")
-    console.print(f"    Rejected: {trans_stats.get('rejected', 0)}")
+    console.print("\n[bold green]═══════════════════════════════════════════════════════════[/bold green]")
+    console.print("[bold]📊 Translation Summary[/bold]")
+    console.print("[bold green]═══════════════════════════════════════════════════════════[/bold green]\n")
+    
+    console.print("[bold]Policy Decisions:[/bold]")
+    console.print(f"  ✓ TRANSLATE: [green]{policy_stats.get('TRANSLATE', 0)}[/green]")
+    console.print(f"  ⊘ SKIP: [yellow]{policy_stats.get('SKIP', 0)}[/yellow]")
+    console.print(f"  ⊘ KEEP_ORIGINAL: [yellow]{policy_stats.get('KEEP_ORIGINAL', 0)}[/yellow]\n")
+    
+    console.print("[bold]Translation Results:[/bold]")
+    console.print(f"  ✓ Translated: [green]{final_stats.get('translated', 0)}[/green]")
+    if final_stats.get('failed', 0) > 0:
+        console.print(f"  ✗ Failed: [red]{final_stats.get('failed', 0)}[/red]")
+    if final_stats.get('skipped', 0) > 0:
+        console.print(f"  ⊘ Skipped: [yellow]{final_stats.get('skipped', 0)}[/yellow]")
+    if final_stats.get('rejected', 0) > 0:
+        console.print(f"  ⚠ Rejected (placeholder issues): [yellow]{final_stats.get('rejected', 0)}[/yellow]")
+    
+    # Calculate success rate
+    total_processed = sum(final_stats.values())
+    if total_processed > 0:
+        success_rate = (final_stats.get('translated', 0) / total_processed) * 100
+        console.print(f"\n  Success Rate: [bold]{success_rate:.1f}%[/bold]")
+    
+    console.print("\n[bold green]═══════════════════════════════════════════════════════════[/bold green]\n")
 
     if dry_run:
         output.info("Dry run complete - no changes made")

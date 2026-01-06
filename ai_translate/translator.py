@@ -140,8 +140,10 @@ class Translator:
                 # Validate placeholders
                 if not self.policy.validate_placeholders(text, translated):
                     self.stats["rejected"] += 1
+                    # Only show warnings in verbose mode to avoid spam
                     self.output.warning(
-                        f"Placeholder mismatch: '{text}' -> '{translated}'"
+                        f"Placeholder mismatch: '{text}' -> '{translated}'",
+                        verbose_only=True
                     )
                     return None, "rejected"
 

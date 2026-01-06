@@ -35,8 +35,10 @@ class OutputFilter:
         """Print success message."""
         self.console.print(f"[green]✓[/green] {message}")
 
-    def warning(self, message: str):
+    def warning(self, message: str, verbose_only: bool = False):
         """Print warning message."""
+        if verbose_only and not self.verbose:
+            return
         self.error_console.print(f"[yellow]⚠[/yellow] {message}")
 
     def error(self, message: str):
