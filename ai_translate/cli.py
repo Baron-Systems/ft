@@ -29,13 +29,47 @@ console = Console()
 
 
 @app.callback(invoke_without_command=True)
-def translate(
+def main(
     ctx: typer.Context,
     apps: Optional[str] = typer.Argument(None, help="App name(s) to translate (comma-separated)"),
     lang: Optional[str] = typer.Option(None, "--lang", help="Target language code (e.g., 'ar', 'es', 'fr')"),
     site: Optional[str] = typer.Option(None, "--site", help="Site name (optional, for database content)"),
     bench_path: Optional[str] = typer.Option(None, "--bench-path", help="Path to bench directory"),
     verbose: bool = typer.Option(False, "--verbose", help="Verbose output"),
+):
+    """
+    AI-powered translation system for Frappe / ERPNext.
+    
+    Usage:
+        ai-translate <apps> --lang <lang> [--site <site>]
+    
+    Example:
+        ai-translate erpnext --lang ar --site mysite
+    """
+    # If a subcommand was invoked, don't run translate
+    if ctx.invoked_subcommand is not None:
+        return
+    
+    # If apps and lang are provided, run translate
+    if apps and lang:
+        translate(apps=apps, lang=lang, site=site, bench_path=bench_path, verbose=verbose)
+    elif not apps or not lang:
+        # Show error if required args missing
+        output = OutputFilter(verbose=verbose)
+        output.error("App name(s) and --lang are required")
+        output.info("\nUsage:")
+        output.info("  ai-translate <apps> --lang <lang> [--site <site>]")
+        output.info("\nExample:")
+        output.info("  ai-translate erpnext --lang ar --site mysite")
+        sys.exit(1)
+
+
+def translate(
+    apps: str,
+    lang: str,
+    site: Optional[str],
+    bench_path: Optional[str],
+    verbose: bool,
 ):
     """
     Translate app(s) - extracts all user-visible strings and translates missing ones.
@@ -46,30 +80,7 @@ def translate(
     - Database content (if --site is provided)
     
     Only translates missing strings - preserves existing translations.
-    
-    Example:
-        ai-translate erpnext --lang ar --site mysite
     """
-    # If a subcommand was invoked (like 'review' or 'list-benches'), don't run translate
-    if ctx.invoked_subcommand is not None:
-        return
-    
-    # Validate required arguments
-    if not apps:
-        output = OutputFilter(verbose=verbose)
-        output.error("App name(s) required")
-        output.info("\nUsage:")
-        output.info("  ai-translate <apps> --lang <lang> [--site <site>]")
-        output.info("\nExample:")
-        output.info("  ai-translate erpnext --lang ar --site mysite")
-        sys.exit(1)
-    
-    if not lang:
-        output = OutputFilter(verbose=verbose)
-        output.error("--lang is required")
-        output.info("\nUsage:")
-        output.info("  ai-translate <apps> --lang <lang> [--site <site>]")
-        sys.exit(1)
     
     # Initialize output
     output = OutputFilter(verbose=verbose)
