@@ -36,6 +36,7 @@ class ProgressTracker:
             TimeRemainingColumn(),
             console=None,  # Will use default console
             transient=False,
+            refresh_per_second=2,  # Limit refresh rate to reduce flicker
         )
         self.task_id: Optional[int] = None
         self.start_time: Optional[float] = None

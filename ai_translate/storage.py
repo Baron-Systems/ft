@@ -28,12 +28,19 @@ class TranslationStorage:
         Initialize translation storage.
 
         Args:
-            storage_path: Base path for storage
+            storage_path: Base path for storage (can be app translations dir or site dir)
             lang: Language code
         """
         self.storage_path = Path(storage_path)
         self.lang = lang
-        self.csv_path = self.storage_path / "translations" / f"{lang}.csv"
+        
+        # Check if storage_path is already the translations directory
+        if storage_path.name == "translations":
+            self.csv_path = storage_path / f"{lang}.csv"
+        else:
+            # Assume it's a site path, create translations subdirectory
+            self.csv_path = storage_path / "translations" / f"{lang}.csv"
+        
         self.csv_path.parent.mkdir(parents=True, exist_ok=True)
         self._cache: Dict[str, TranslationEntry] = {}
         self._load_cache()
@@ -46,23 +53,37 @@ class TranslationStorage:
         try:
             with open(self.csv_path, "r", encoding="utf-8", newline="") as f:
                 reader = csv.DictReader(f)
+                # Frappe standard CSV has: source_text, translated_text
+                # Our extended format may have additional columns
                 for row in reader:
-                    key = self._make_key(row["source_text"], row.get("context", ""))
+                    if "source_text" not in row or "translated_text" not in row:
+                        continue
+                    
+                    source_text = row["source_text"]
+                    translated_text = row["translated_text"]
+                    
+                    # Use context from row if available, otherwise create default
                     context = TranslationContext(
                         layer=row.get("layer", "A"),
                         app=row.get("app"),
                         doctype=row.get("doctype"),
                         fieldname=row.get("fieldname"),
                     )
+                    
+                    # Create key using source_text only (Frappe standard)
+                    # This allows merging with existing Frappe translation files
+                    key = self._make_key(source_text, "")
+                    
                     self._cache[key] = TranslationEntry(
-                        source_text=row["source_text"],
-                        translated_text=row["translated_text"],
+                        source_text=source_text,
+                        translated_text=translated_text,
                         context=context,
                         source_file=row.get("source_file"),
                         line_number=int(row.get("line_number", 0)),
                     )
-        except Exception:
-            pass  # Start fresh if CSV is corrupted
+        except Exception as e:
+            # Start fresh if CSV is corrupted
+            pass
 
     def _make_key(self, source_text: str, context_str: str = "") -> str:
         """Create cache key."""
@@ -70,23 +91,33 @@ class TranslationStorage:
         return hashlib.md5(combined.encode()).hexdigest()
 
     def get(
-        self, source_text: str, context: TranslationContext
+        self, source_text: str, context: Optional[TranslationContext] = None
     ) -> Optional[str]:
         """
         Get translation for source text.
 
         Args:
             source_text: Source text
-            context: Translation context
+            context: Translation context (optional, for compatibility)
 
         Returns:
             Translated text or None
         """
-        context_str = self._context_to_string(context)
-        key = self._make_key(source_text, context_str)
+        # Frappe uses source_text as unique key (case-sensitive)
+        # Try exact match first (Frappe standard)
+        key = self._make_key(source_text, "")
         entry = self._cache.get(key)
         if entry:
             return entry.translated_text
+        
+        # Try with context if provided (for backward compatibility)
+        if context:
+            context_str = self._context_to_string(context)
+            key = self._make_key(source_text, context_str)
+            entry = self._cache.get(key)
+            if entry:
+                return entry.translated_text
+        
         return None
 
     def set(
@@ -107,8 +138,9 @@ class TranslationStorage:
             source_file: Source file path
             line_number: Line number
         """
-        context_str = self._context_to_string(context)
-        key = self._make_key(source_text, context_str)
+        # Frappe standard: use source_text as unique key
+        # This allows overwriting existing translations and merging with Frappe files
+        key = self._make_key(source_text, "")
         entry = TranslationEntry(
             source_text=source_text,
             translated_text=translated_text,
@@ -123,38 +155,38 @@ class TranslationStorage:
         if not self._cache:
             return
 
-        # Normalize and deduplicate
+        # Normalize and deduplicate by source_text (Frappe standard)
         normalized: Dict[str, TranslationEntry] = {}
         for entry in self._cache.values():
+            # Use source_text as unique key (Frappe standard)
+            # If duplicate, keep the most recent one
             normalized_text = self._normalize_text(entry.source_text)
-            key = self._make_key(normalized_text, self._context_to_string(entry.context))
+            key = self._make_key(normalized_text, "")
             if key not in normalized:
                 normalized[key] = entry
+            else:
+                # Update if we have a newer translation
+                normalized[key] = entry
 
-        # Write to CSV
+        # Write to CSV - Frappe standard format: source_text, translated_text
+        # We use minimal format compatible with Frappe's translation system
         with open(self.csv_path, "w", encoding="utf-8", newline="") as f:
+            # Frappe standard: only source_text and translated_text
+            # Additional columns are optional metadata
             fieldnames = [
                 "source_text",
                 "translated_text",
-                "layer",
-                "app",
-                "doctype",
-                "fieldname",
-                "source_file",
-                "line_number",
             ]
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
-            for entry in normalized.values():
+            
+            # Sort by source_text for consistent output
+            sorted_entries = sorted(normalized.values(), key=lambda e: e.source_text.lower())
+            
+            for entry in sorted_entries:
                 writer.writerow({
                     "source_text": entry.source_text,
                     "translated_text": entry.translated_text,
-                    "layer": entry.context.layer,
-                    "app": entry.context.app or "",
-                    "doctype": entry.context.doctype or "",
-                    "fieldname": entry.context.fieldname or "",
-                    "source_file": entry.source_file or "",
-                    "line_number": entry.line_number,
                 })
 
     def _normalize_text(self, text: str) -> str:

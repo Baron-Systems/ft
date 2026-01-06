@@ -17,7 +17,7 @@ from ai_translate.gettext_sync import GettextSync
 from ai_translate.manager import BenchManager
 from ai_translate.output import OutputFilter
 from ai_translate.progress import ProgressTracker
-from ai_translate.storage import TranslationStorage
+from ai_translate.storage import TranslationEntry, TranslationStorage
 from ai_translate.translator import Translator
 
 app = typer.Typer(
@@ -160,13 +160,8 @@ def translate(
         output.error(f"Failed to initialize translator: {e}")
         sys.exit(1)
 
-    # Initialize storage
-    storage_path = bench_manager.bench_path / "sites" / (site or "default")
-    storage = TranslationStorage(storage_path=storage_path, lang=lang)
-
-    # Process each app
-    all_extracted = []
-    total_to_translate = 0
+    # Process each app separately
+    all_app_stats = []
 
     for app_name in app_names:
         app_path = bench_manager.get_app_path(app_name)
@@ -176,11 +171,20 @@ def translate(
 
         output.info(f"Processing app: {app_name}")
 
+        # Initialize storage for this app - use app's translation directory
+        # Frappe standard: apps/app_name/app_name/translations/lang.csv
+        app_translations_path = app_path / app_name / "translations"
+        storage = TranslationStorage(storage_path=app_translations_path, lang=lang)
+        output.info(f"Using translation file: {storage.csv_path}")
+
+        # Extract strings for this app only
+        app_extracted = []
+
         # Layer A: Code & Files
         if "A" in layer_list:
             extractor = LayerAExtractor(app_name=app_name, app_path=app_path)
             extracted = list(extractor.extract_all())
-            all_extracted.extend(extracted)
+            app_extracted.extend(extracted)
             output.info(f"Extracted {len(extracted)} strings from Layer A")
 
         # Layers B & C: Database
@@ -193,137 +197,108 @@ def translate(
             # (This would need proper conversion in production)
             output.info(f"Extracted {len(db_extracted)} strings from Layers B/C")
 
-    # Filter and translate
-    output.info(f"Total extracted: {len(all_extracted)}")
+        # Filter and translate for this app only
+        output.info(f"Total extracted for {app_name}: {len(app_extracted)}")
 
-    # Apply policy and filter
+        # Apply policy and filter
+        from ai_translate.policy import PolicyEngine
+
+        policy = PolicyEngine()
+        to_translate = []
+
+        for extracted in app_extracted:
+            decision = policy.decide(extracted.text, extracted.context)
+            if decision.value == "translate":
+                # Check if already translated
+                existing = storage.get(extracted.text, extracted.context)
+                if not existing or update_existing:
+                    to_translate.append(extracted)
+
+        total_to_translate = len(to_translate)
+        output.info(f"Strings to translate: {total_to_translate}")
+
+        if total_to_translate == 0:
+            output.info(f"No new strings to translate for {app_name}")
+            continue
+
+        # Translate
+        translation_stats = {
+            "translated": 0,
+            "failed": 0,
+            "skipped": 0,
+            "rejected": 0,
+        }
+        
+        if not dry_run:
+            consecutive_failures = 0
+            max_consecutive_failures = 5  # Stop after 5 consecutive failures
+            
+            with ProgressTracker(total=total_to_translate, description=f"Translating {app_name}") as progress:
+                for extracted in to_translate:
+                    translated, status = translator.translate(
+                        extracted.text, lang, source_lang="en"
+                    )
+                    
+                    # Track statistics
+                    if status == "ok" and translated:
+                        consecutive_failures = 0  # Reset failure counter
+                        translation_stats["translated"] += 1
+                        storage.set(
+                            extracted.text,
+                            translated,
+                            extracted.context,
+                            extracted.source_file,
+                            extracted.line_number,
+                        )
+                    elif status == "failed":
+                        consecutive_failures += 1
+                        translation_stats["failed"] += 1
+                        if consecutive_failures >= max_consecutive_failures:
+                            output.error(f"Stopping translation after {max_consecutive_failures} consecutive failures")
+                            output.error("Please check your API key and model availability")
+                            break
+                    elif status == "skipped":
+                        translation_stats["skipped"] += 1
+                    elif status == "rejected":
+                        translation_stats["rejected"] += 1
+                    
+                    progress.update()
+
+            # Save storage for this app
+            storage.save()
+            output.success(f"✓ Translations saved to: {storage.csv_path}")
+        
+        # Store stats for summary
+        all_app_stats.append((app_name, translation_stats, app_extracted))
+
+    # Note: Fix missing, PO/MO sync, and DB writes are skipped when using app translation files
+    # These features work with site-based storage only
+    if all_app_stats:
+        output.info("\nNote: Translations are saved directly to app translation files.")
+        output.info("PO/MO sync and database writes are skipped when using app translation files.")
+
+    # Print comprehensive statistics for all apps
     from ai_translate.policy import PolicyEngine
-
     policy = PolicyEngine()
-    to_translate = []
-
-    for extracted in all_extracted:
-        decision = policy.decide(extracted.text, extracted.context)
-        if decision.value == "translate":
-            # Check if already translated
-            existing = storage.get(extracted.text, extracted.context)
-            if not existing or update_existing:
-                to_translate.append(extracted)
-
-    total_to_translate = len(to_translate)
-    output.info(f"Strings to translate: {total_to_translate}")
-
-    if total_to_translate == 0:
-        output.info("No strings to translate")
-        if dry_run:
-            output.info("Dry run complete")
-        return
-
-    # Translate
-    translation_stats = {
+    policy_stats = policy.get_stats()
+    
+    # Aggregate stats from all apps
+    total_final_stats = {
         "translated": 0,
         "failed": 0,
         "skipped": 0,
         "rejected": 0,
     }
     
-    if not dry_run:
-        consecutive_failures = 0
-        max_consecutive_failures = 5  # Stop after 5 consecutive failures
-        
-        with ProgressTracker(total=total_to_translate, description="Translating") as progress:
-            for extracted in to_translate:
-                translated, status = translator.translate(
-                    extracted.text, lang, source_lang="en"
-                )
-                
-                # Track statistics
-                if status == "ok" and translated:
-                    consecutive_failures = 0  # Reset failure counter
-                    translation_stats["translated"] += 1
-                    storage.set(
-                        extracted.text,
-                        translated,
-                        extracted.context,
-                        extracted.source_file,
-                        extracted.line_number,
-                    )
-                elif status == "failed":
-                    consecutive_failures += 1
-                    translation_stats["failed"] += 1
-                    if consecutive_failures >= max_consecutive_failures:
-                        output.error(f"Stopping translation after {max_consecutive_failures} consecutive failures")
-                        output.error("Please check your API key and model availability")
-                        break
-                elif status == "skipped":
-                    translation_stats["skipped"] += 1
-                elif status == "rejected":
-                    translation_stats["rejected"] += 1
-                
-                progress.update()
-
-        # Save storage
-        storage.save()
-        output.success("Translations saved to CSV")
-
-    # Fix missing if requested
-    if fix_missing:
-        fixer = TranslationFixer(storage, output)
-        missing = fixer.find_missing([e.text for e in all_extracted])
-        if missing:
-            output.info(f"Found {len(missing)} missing translations")
-            if not dry_run:
-                # Translate missing
-                for text in missing:
-                    translated, status = translator.translate(text, lang)
-                    if status == "ok" and translated:
-                        from ai_translate.policy import TranslationContext
-                        context = TranslationContext(layer="A")
-                        storage.set(text, translated, context)
-                storage.save()
-
-    # Sync to PO/MO
-    if site:
-        locale_path = bench_manager.get_locale_path(site, lang)
-        if locale_path:
-            gettext_sync = GettextSync(storage, locale_path, output)
-            gettext_sync.sync_csv_to_po(dry_run=dry_run)
-            if not dry_run:
-                gettext_sync.compile_mo(dry_run=dry_run)
-
-    # Write to database
-    if site and not dry_run:
-        db_writer = TranslationDBWriter(
-            site=site, update_existing=update_existing, output=output
-        )
-        entries = []
-        for e in all_extracted:
-            translated = storage.get(e.text, e.context)
-            if translated:  # Only add entries with translations
-                entries.append(
-                    TranslationEntry(
-                        source_text=e.text,
-                        translated_text=translated,
-                        context=e.context,
-                        source_file=e.source_file,
-                        line_number=e.line_number,
-                    )
-                )
-        if entries:
-            db_writer.write_batch(entries, dry_run=dry_run)
-            db_stats = db_writer.get_stats()
-            output.info(f"Database writes: {db_stats}")
-        else:
-            output.info("No translations to write to database")
-
-    # Print comprehensive statistics
-    policy_stats = policy.get_stats()
-    trans_stats = translator.get_stats()
+    for app_name, app_stats, app_extracted in all_app_stats:
+        for key in total_final_stats:
+            total_final_stats[key] += app_stats.get(key, 0)
     
-    # Use translation_stats if available (more accurate)
-    final_stats = translation_stats if translation_stats.get("translated", 0) > 0 else trans_stats
+    final_stats = total_final_stats
 
-    console.print("\n[bold green]═══════════════════════════════════════════════════════════[/bold green]")
+    # Print summary only after progress bar is done
+    console.print()  # Empty line after progress bar
+    console.print("[bold green]═══════════════════════════════════════════════════════════[/bold green]")
     console.print("[bold]📊 Translation Summary[/bold]")
     console.print("[bold green]═══════════════════════════════════════════════════════════[/bold green]\n")
     
@@ -340,6 +315,8 @@ def translate(
         console.print(f"  ⊘ Skipped: [yellow]{final_stats.get('skipped', 0)}[/yellow]")
     if final_stats.get('rejected', 0) > 0:
         console.print(f"  ⚠ Rejected (placeholder issues): [yellow]{final_stats.get('rejected', 0)}[/yellow]")
+        if verbose:
+            output.info("Use --verbose to see details of rejected translations", verbose_only=True)
     
     # Calculate success rate
     total_processed = sum(final_stats.values())
