@@ -1,6 +1,7 @@
 """Database extraction for Layers B & C (whitelist-based, schema-safe)."""
 
 import os
+import json
 from dataclasses import dataclass
 from typing import Dict, Iterator, List, Optional
 
@@ -25,7 +26,9 @@ class DBExtractor:
     LAYER_B_SCOPES = [
         DBExtractionScope(
             doctype="Workspace",
-            fields=["label", "title", "description"],
+            # IMPORTANT: Workspace user-visible labels are often embedded inside `content` (JSON).
+            # We parse and extract strings from it safely; we never translate the raw JSON blob.
+            fields=["label", "title", "description", "content"],
             layer="B",
         ),
         DBExtractionScope(
@@ -281,6 +284,15 @@ class DBExtractor:
                     # Skip empty values
                     if not field_value or not isinstance(field_value, str):
                         continue
+
+                    # Special handling: Workspace.content is JSON with multiple embedded UI strings.
+                    # Extract those strings instead of yielding the JSON blob.
+                    if scope.doctype == "Workspace" and field_name == "content":
+                        yield from self._extract_from_workspace_content(
+                            content_json=field_value,
+                            workspace_name=record_name,
+                        )
+                        continue
                     
                     # Skip if value looks like an identifier or code
                     if self._is_identifier_or_code(field_value):
@@ -328,6 +340,73 @@ class DBExtractor:
         ]
         
         return any(identifier_patterns)
+
+    def _extract_from_workspace_content(
+        self,
+        content_json: str,
+        workspace_name: str,
+    ) -> Iterator[ExtractedString]:
+        """
+        Extract user-visible strings embedded in Workspace.content JSON.
+
+        Workspace.content commonly contains headers/sections/link labels that users see in Desk,
+        e.g. "Reports & Masters", "Tax Masters", etc.
+        """
+        s = (content_json or "").strip()
+        if not s:
+            return
+
+        try:
+            data = json.loads(s)
+        except Exception:
+            # Some installs may store non-JSON content; ignore safely.
+            return
+
+        # Keys that are most likely to be user-facing labels in workspace structures.
+        candidate_keys = {
+            "label",
+            "title",
+            "description",
+            "text",
+            "heading",
+            "name",  # sometimes used for headers; policy will filter identifiers
+        }
+
+        def walk(obj):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    if isinstance(v, (dict, list)):
+                        yield from walk(v)
+                    elif isinstance(v, str) and k in candidate_keys:
+                        yield (k, v)
+            elif isinstance(obj, list):
+                for it in obj:
+                    yield from walk(it)
+
+        for key, text in walk(data):
+            t = (text or "").strip()
+            if not t or len(t) <= 1:
+                continue
+            # Quick exclusions for common non-text tokens in workspace JSON
+            if t.startswith("fa-") or t.startswith("eval:") or t.startswith("icon:") or t.startswith("/"):
+                continue
+
+            context = TranslationContext(
+                layer="B",
+                doctype="Workspace",
+                fieldname="content",
+                ui_surface="workspace",
+                data_nature="label",
+                intent="user-facing",
+            )
+
+            yield ExtractedString(
+                text=t,
+                context=context,
+                source_file=f"db:Workspace:{workspace_name}:content:{key}",
+                line_number=0,
+                original_line=f"content.{key}: {t}",
+            )
 
     def extract_all(
         self, layers: List[str], site: Optional[str] = None

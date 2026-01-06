@@ -1,6 +1,9 @@
 """CLI entrypoint for ai-translate - Language-Agnostic Localization Infrastructure."""
 
+import csv
+import html
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -61,6 +64,7 @@ def cli():
 @click.option('--context', '-c', help='App description/context (improves meaning-based translations)')
 @click.option('--bench-path', '-b', help='Path to bench directory')
 @click.option('--no-gettext', is_flag=True, hidden=True, help='Skip PO/MO sync (advanced)')
+@click.option('--diagnose', is_flag=True, hidden=True, help='Write a per-string diagnostics CSV (advanced)')
 @click.option('--db-scope', is_flag=True, hidden=True, help='Include database content (Layers B & C) (advanced)')
 @click.option('--db-scope-only', is_flag=True, hidden=True, help='Only process database content (skip Layer A) (advanced)')
 @click.option('--db-doc-types', hidden=True, help='Comma-separated allowlist of DocTypes to extract (advanced)')
@@ -75,6 +79,7 @@ def translate(
     context: Optional[str],
     bench_path: Optional[str],
     no_gettext: bool,
+    diagnose: bool,
     db_scope: bool,
     db_scope_only: bool,
     db_doc_types: Optional[str],
@@ -103,6 +108,7 @@ def translate(
         context=context,
         bench_path=bench_path,
         no_gettext=no_gettext,
+        diagnose=diagnose,
         db_scope=db_scope,
         db_scope_only=db_scope_only,
         db_doc_types=db_doc_types,
@@ -413,6 +419,7 @@ def _translate_impl(
     context: Optional[str],
     bench_path: Optional[str],
     no_gettext: bool,
+    diagnose: bool,
     db_scope: bool,
     db_scope_only: bool,
     db_doc_types: Optional[str],
@@ -515,6 +522,47 @@ def _translate_impl(
     from ai_translate.policy import PolicyEngine
     policy = PolicyEngine()
 
+    def _canon(s: str) -> str:
+        """
+        Canonicalize for matching (NOT for writing keys).
+        Fixes common "same text, different encoding" issues like &quot; vs ".
+        """
+        t = (s or "").strip()
+        if not t:
+            return ""
+        try:
+            t = html.unescape(t)
+        except Exception:
+            pass
+        t = t.replace("\xa0", " ").replace("&nbsp;", " ")
+        t = re.sub(r"\s+", " ", t).strip()
+        return t
+
+    def _write_diagnostics_csv(path: Path, rows: list[dict]):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            w = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "source_text",
+                    "canonical_text",
+                    "layer",
+                    "doctype",
+                    "fieldname",
+                    "source_file",
+                    "decision",
+                    "reason",
+                    "exists_in_app_csv",
+                    "exists_in_app_csv_via",
+                    "exists_in_frappe_core",
+                    "queued_for_translation",
+                    "notes",
+                ],
+            )
+            w.writeheader()
+            for r in rows:
+                w.writerow(r)
+
     def _contains_cjk(s: str) -> bool:
         import re
         return bool(re.search(r"[\u4E00-\u9FFF\u3400-\u4DBF\u3040-\u30FF]", s or ""))
@@ -559,6 +607,7 @@ def _translate_impl(
         app_translations_path = app_path / app_name / "translations"
         storage = TranslationStorage(storage_path=app_translations_path, lang=lang)
         output.info(f"Using translation file: {storage.csv_path}")
+        diagnostics_rows: list[dict] = []
 
         # Extract strings for this app only
         app_extracted = []
@@ -606,9 +655,59 @@ def _translate_impl(
 
         for extracted in app_extracted:
             decision, reason = policy.decide(extracted.text, extracted.context)
+            canon = _canon(extracted.text)
+
+            # Check existing translations (exact first, then canonical).
+            existing_entry = storage.get_entry_by_source(extracted.text)
+            exists_via = "exact" if existing_entry else ""
+            notes: list[str] = []
+
+            if not existing_entry and canon and canon != extracted.text:
+                existing_entry = storage.get_entry_by_source(canon)
+                if existing_entry:
+                    exists_via = "canonical"
+                    notes.append("matched_existing_via_canonical")
+                    # Add an alias for the exact string so runtime lookups hit regardless of encoding.
+                    if not dry_run:
+                        storage.set(
+                            extracted.text,
+                            existing_entry.translated_text,
+                            extracted.context,
+                            extracted.source_file,
+                            extracted.line_number,
+                            update_existing=False,
+                        )
+                        notes.append("added_alias_row_from_canonical")
+
+            exists_in_frappe = False
+            if frappe_storage:
+                if frappe_storage.get(extracted.text) or (canon and frappe_storage.get(canon)):
+                    exists_in_frappe = True
+
+            queued = False
             if decision.value == "translate":
-                # Check if already translated
-                existing_entry = storage.get_entry_by_source(extracted.text)
+                queued = not (existing_entry and not repair_existing)
+
+            if diagnose:
+                diagnostics_rows.append(
+                    {
+                        "source_text": extracted.text,
+                        "canonical_text": canon,
+                        "layer": extracted.context.layer if extracted.context else "",
+                        "doctype": extracted.context.doctype if extracted.context else "",
+                        "fieldname": extracted.context.fieldname if extracted.context else "",
+                        "source_file": extracted.source_file or "",
+                        "decision": decision.value,
+                        "reason": (reason.value if reason else ""),
+                        "exists_in_app_csv": bool(existing_entry),
+                        "exists_in_app_csv_via": exists_via,
+                        "exists_in_frappe_core": exists_in_frappe,
+                        "queued_for_translation": queued,
+                        "notes": ";".join(notes),
+                    }
+                )
+
+            if decision.value == "translate":
                 if existing_entry and not repair_existing:
                     continue
                 if existing_entry and repair_existing:
@@ -617,7 +716,7 @@ def _translate_impl(
                         continue
                 # If not present in app translations, also respect frappe core translations
                 if not existing_entry and not repair_existing and frappe_storage:
-                    if frappe_storage.get(extracted.text):
+                    if frappe_storage.get(extracted.text) or (canon and frappe_storage.get(canon)):
                         continue
                 # Translate missing strings OR ones selected for repair
                 if extracted.text not in unique_by_text:
@@ -665,6 +764,16 @@ def _translate_impl(
                                 extracted.line_number,
                                 update_existing=bool(repair_existing),
                             )
+                            canon2 = _canon(extracted.text)
+                            if canon2 and canon2 != extracted.text:
+                                storage.set(
+                                    canon2,
+                                    translated,
+                                    extracted.context,
+                                    extracted.source_file,
+                                    extracted.line_number,
+                                    update_existing=bool(repair_existing),
+                                )
                         elif trans_status == "failed":
                             translation_stats["failed"] += 1
                         elif trans_status == "skipped":
@@ -677,6 +786,10 @@ def _translate_impl(
             # Save storage for this app
             storage.save()
             output.success(f"✓ Translations saved to: {storage.csv_path}")
+            if diagnose:
+                diag_path = storage.csv_path.parent / f"{lang}_diagnostics.csv"
+                _write_diagnostics_csv(diag_path, diagnostics_rows)
+                output.success(f"✓ Diagnostics written: {diag_path}")
 
             # Professional behavior: Sync gettext assets automatically (PO/MO) when a site is involved.
             # This keeps `sites/<site>/assets/locale/<lang>/LC_MESSAGES/<lang>.po/.mo` up to date.
@@ -689,6 +802,14 @@ def _translate_impl(
                         gs.compile_mo(dry_run=False)
                 else:
                     output.warning(f"Could not determine locale path for site '{site}', skipping PO/MO sync")
+
+            # Best-effort: clear Frappe caches so new translations appear in UI immediately.
+            if site:
+                try:
+                    bench_manager.run_bench_command(["clear-cache"], site=site)
+                    bench_manager.run_bench_command(["clear-website-cache"], site=site)
+                except Exception:
+                    pass
         else:
             output.info("Dry run - no translations saved")
         

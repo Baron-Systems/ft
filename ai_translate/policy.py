@@ -151,18 +151,6 @@ class PolicyEngine:
         elif text.lower() in self.SQL_KEYWORDS:
             decision = Decision.KEEP_ORIGINAL
             reason = RejectionReason.LOGIC_BEARING
-        # Code-like identifiers (single word, underscore/camelCase)
-        elif self._is_code_like(text):
-            decision = Decision.KEEP_ORIGINAL
-            reason = RejectionReason.CODE_LIKE
-        # Blacklist patterns
-        elif self._matches_blacklist(text):
-            decision = Decision.KEEP_ORIGINAL
-            reason = RejectionReason.CONTAINS_IDENTIFIER
-        # Field names that are identifiers
-        elif context.fieldname and self._is_identifier(context.fieldname):
-            decision = Decision.KEEP_ORIGINAL
-            reason = RejectionReason.CONTAINS_IDENTIFIER
         # Layer-specific rules
         elif context.layer == "A":
             decision, reason = self._decide_layer_a(text, context)
@@ -170,6 +158,10 @@ class PolicyEngine:
             decision, reason = self._decide_layer_b(text, context)
         elif context.layer == "C":
             decision, reason = self._decide_layer_c(text, context)
+        # Field names that are identifiers (fallback)
+        elif context.fieldname and self._is_identifier(context.fieldname):
+            decision = Decision.KEEP_ORIGINAL
+            reason = RejectionReason.CONTAINS_IDENTIFIER
         # Default: translate if uncertain but looks translatable
         elif self._looks_translatable(text):
             decision = Decision.TRANSLATE
@@ -222,6 +214,9 @@ class PolicyEngine:
         # In code, be very conservative
         if context.fieldname in ('route', 'api_key', 'name', 'fieldname'):
             return Decision.KEEP_ORIGINAL, RejectionReason.CONTAINS_IDENTIFIER
+        # Code-like strings and identifiers should not be translated in code layer
+        if self._is_code_like(text) or self._matches_blacklist(text):
+            return Decision.KEEP_ORIGINAL, RejectionReason.CODE_LIKE
         # DocType names, field names
         if context.doctype and context.fieldname == 'name':
             return Decision.KEEP_ORIGINAL, RejectionReason.CONTAINS_IDENTIFIER
