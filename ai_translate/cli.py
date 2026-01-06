@@ -22,8 +22,28 @@ from ai_translate.translator import Translator
 
 console = Console()
 
+class DefaultToTranslateGroup(click.Group):
+    """
+    Click Group that defaults to `translate` when the first token is not a known subcommand.
 
-@click.group()
+    This enables the ergonomic (and common) usage:
+        ai-translate erpnext --lang ar --site mysite
+
+    which will be treated as:
+        ai-translate translate erpnext --lang ar --site mysite
+    """
+
+    default_cmd_name = "translate"
+
+    def resolve_command(self, ctx: click.Context, args: List[str]):
+        if args and args[0] and not args[0].startswith("-"):
+            cmd_name = args[0]
+            if cmd_name not in self.commands:
+                args.insert(0, self.default_cmd_name)
+        return super().resolve_command(ctx, args)
+
+
+@click.group(cls=DefaultToTranslateGroup)
 @click.version_option(version="1.0.0")
 def cli():
     """AI-powered Localization Infrastructure for Frappe / ERPNext.
@@ -38,18 +58,20 @@ def cli():
 @click.argument('apps', required=True)
 @click.option('--lang', '-l', required=True, help='Target language code (e.g., ar, fr, de, es)')
 @click.option('--site', '-s', help='Site name (required for Layers B & C)')
+@click.option('--context', '-c', help='App description/context (improves meaning-based translations)')
 @click.option('--bench-path', '-b', help='Path to bench directory')
-@click.option('--db-scope', is_flag=True, help='Include database content (Layers B & C)')
-@click.option('--db-scope-only', is_flag=True, help='Only process database content (skip Layer A)')
-@click.option('--db-doc-types', help='Comma-separated allowlist of DocTypes to extract')
-@click.option('--repair-existing', is_flag=True, help='Re-translate clearly corrupted existing translations (wrong script / placeholder corruption)')
+@click.option('--db-scope', is_flag=True, hidden=True, help='Include database content (Layers B & C) (advanced)')
+@click.option('--db-scope-only', is_flag=True, hidden=True, help='Only process database content (skip Layer A) (advanced)')
+@click.option('--db-doc-types', hidden=True, help='Comma-separated allowlist of DocTypes to extract (advanced)')
+@click.option('--repair-existing', is_flag=True, hidden=True, help='Re-translate clearly corrupted existing translations (advanced)')
 @click.option('--verbose', '-v', is_flag=True, help='Verbose output')
-@click.option('--slow-mode', is_flag=True, help='Enable slow mode (rate limiting)')
+@click.option('--slow-mode', is_flag=True, hidden=True, help='Enable slow mode (rate limiting) (advanced)')
 @click.option('--dry-run', is_flag=True, help='Dry run mode (no writes)')
 def translate(
     apps: str,
     lang: str,
     site: Optional[str],
+    context: Optional[str],
     bench_path: Optional[str],
     db_scope: bool,
     db_scope_only: bool,
@@ -70,13 +92,13 @@ def translate(
     
     Examples:
         ai-translate erpnext --lang ar --site mysite
-        ai-translate erpnext --lang ar --site mysite --db-scope
-        ai-translate erpnext --lang ar --db-scope-only --db-doc-types "Workspace,Report"
+        ai-translate translate erpnext --lang ar --site mysite --context "HR Management System"
     """
     _translate_impl(
         apps=apps,
         lang=lang,
         site=site,
+        context=context,
         bench_path=bench_path,
         db_scope=db_scope,
         db_scope_only=db_scope_only,
@@ -88,7 +110,7 @@ def translate(
     )
 
 
-@cli.command(name='list-benches')
+@cli.command(name='list-benches', hidden=True)
 @click.option('--verbose', '-v', is_flag=True, help='Verbose output')
 def list_benches(verbose: bool):
     """List available benches (including Frappe Manager benches)."""
@@ -309,34 +331,39 @@ def review(
         # Review each translation
         reviewed_count = 0
         with ProgressTracker(total=len(all_entries), description="Reviewing") as progress:
-            for entry in all_entries:
-                # Re-translate with context
-                translated, trans_status = translator.translate(
-                    entry.source_text,
+            batch_size = 50
+            for i in range(0, len(all_entries), batch_size):
+                batch_entries = all_entries[i : i + batch_size]
+                batch_texts = [e.source_text for e in batch_entries]
+                results = translator.translate_batch(
+                    batch_texts,
                     lang,
                     source_lang="en",
-                    context=context
+                    batch_size=batch_size,
+                    context=context,
                 )
-                
-                if trans_status == "ok" and translated and translated != entry.translated_text:
-                    # Update if translation improved
-                    storage.set(
-                        entry.source_text,
-                        translated,
-                        entry.context,
-                        entry.source_file,
-                        entry.line_number,
-                    )
-                    reviewed_count += 1
-                
-                progress.update()
+
+                for entry, (translated, trans_status) in zip(batch_entries, results):
+                    if trans_status == "ok" and translated and translated != entry.translated_text:
+                        # Update if translation improved
+                        storage.set(
+                            entry.source_text,
+                            translated,
+                            entry.context,
+                            entry.source_file,
+                            entry.line_number,
+                            update_existing=True,
+                        )
+                        reviewed_count += 1
+
+                    progress.update()
         
         # Save reviewed translations
         storage.save()
         output.success(f"✓ Reviewed {reviewed_count} translations for {app_name}")
 
 
-@cli.command()
+@cli.command(hidden=True)
 @click.argument('apps', required=True)
 @click.option('--lang', '-l', required=True, help='Language code to audit')
 @click.option('--bench-path', '-b', help='Path to bench directory')
@@ -368,6 +395,7 @@ def _translate_impl(
     apps: str,
     lang: str,
     site: Optional[str],
+    context: Optional[str],
     bench_path: Optional[str],
     db_scope: bool,
     db_scope_only: bool,
@@ -399,11 +427,14 @@ def _translate_impl(
 
     # Determine layers to process
     layer_list = []
+    # UX default: if a site is provided and user didn't explicitly ask for "db-only", include DB by default.
+    effective_db_scope = db_scope or (bool(site) and not db_scope_only)
+
     if not db_scope_only:
         layer_list.append("A")  # Always include Layer A unless db-scope-only
-    if db_scope or db_scope_only:
+    if effective_db_scope or db_scope_only:
         if not site:
-            output.error("--site is required when using --db-scope or --db-scope-only")
+            output.error("--site is required to include database content")
             sys.exit(1)
         layer_list.extend(["B", "C"])  # Add database layers
     
@@ -451,6 +482,8 @@ def _translate_impl(
 
     output.info(f"Processing {len(app_names)} app(s): {', '.join(app_names)}")
     output.info(f"Layers: {', '.join(layer_list)}")
+    if context:
+        output.info(f"Context: {context}")
 
     # Initialize translator
     try:
@@ -552,7 +585,8 @@ def _translate_impl(
         output.info(f"Total extracted for {app_name}: {len(app_extracted)}")
 
         # Apply policy and filter
-        to_translate = []
+        # Deduplicate by source_text (Frappe CSV key) to avoid re-sending duplicates from different files/scopes.
+        unique_by_text = {}
 
         for extracted in app_extracted:
             decision, reason = policy.decide(extracted.text, extracted.context)
@@ -570,8 +604,10 @@ def _translate_impl(
                     if frappe_storage.get(extracted.text):
                         continue
                 # Translate missing strings OR ones selected for repair
-                to_translate.append(extracted)
+                if extracted.text not in unique_by_text:
+                    unique_by_text[extracted.text] = extracted
 
+        to_translate = list(unique_by_text.values())
         total_to_translate = len(to_translate)
         output.info(f"Strings to translate: {total_to_translate}")
 
@@ -588,39 +624,39 @@ def _translate_impl(
         }
         
         if not dry_run:
-            consecutive_failures = 0
-            max_consecutive_failures = 5  # Stop after 5 consecutive failures
-            
+            # Batch translation for speed: 1 API call per ~50 strings (with safe fallback).
+            batch_size = 50
             with ProgressTracker(total=total_to_translate, description=f"Translating {app_name}") as progress:
-                for extracted in to_translate:
-                    translated, trans_status = translator.translate(
-                        extracted.text, lang, source_lang="en"
+                for i in range(0, len(to_translate), batch_size):
+                    batch_items = to_translate[i : i + batch_size]
+                    batch_texts = [x.text for x in batch_items]
+                    results = translator.translate_batch(
+                        batch_texts,
+                        lang,
+                        source_lang="en",
+                        batch_size=batch_size,
+                        context=context,
                     )
-                    
-                    # Track statistics
-                    if trans_status == "ok" and translated:
-                        consecutive_failures = 0  # Reset failure counter
-                        translation_stats["translated"] += 1
-                        storage.set(
-                            extracted.text,
-                            translated,
-                            extracted.context,
-                            extracted.source_file,
-                            extracted.line_number,
-                        )
-                    elif trans_status == "failed":
-                        consecutive_failures += 1
-                        translation_stats["failed"] += 1
-                        if consecutive_failures >= max_consecutive_failures:
-                            output.error(f"Stopping translation after {max_consecutive_failures} consecutive failures")
-                            output.error("Please check your API key and model availability")
-                            break
-                    elif trans_status == "skipped":
-                        translation_stats["skipped"] += 1
-                    elif trans_status == "rejected":
-                        translation_stats["rejected"] += 1
-                    
-                    progress.update()
+
+                    for extracted, (translated, trans_status) in zip(batch_items, results):
+                        if trans_status == "ok" and translated:
+                            translation_stats["translated"] += 1
+                            storage.set(
+                                extracted.text,
+                                translated,
+                                extracted.context,
+                                extracted.source_file,
+                                extracted.line_number,
+                                update_existing=bool(repair_existing),
+                            )
+                        elif trans_status == "failed":
+                            translation_stats["failed"] += 1
+                        elif trans_status == "skipped":
+                            translation_stats["skipped"] += 1
+                        elif trans_status == "rejected":
+                            translation_stats["rejected"] += 1
+
+                        progress.update()
 
             # Save storage for this app
             storage.save()

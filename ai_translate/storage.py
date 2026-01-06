@@ -4,7 +4,7 @@ import csv
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from ai_translate.policy import TranslationContext
 
@@ -46,47 +46,104 @@ class TranslationStorage:
         
         self.csv_path.parent.mkdir(parents=True, exist_ok=True)
         self._cache: Dict[str, TranslationEntry] = {}
+        # Frappe translation CSVs are often headerless (two columns). Track what we detected so we can
+        # write back in a compatible format.
+        self._csv_has_header: Optional[bool] = None
         self._load_cache()
+
+    def _iter_existing_rows(self) -> Iterable[Tuple[str, str]]:
+        """
+        Yield (source_text, translated_text) pairs from the existing CSV.
+
+        Supports both:
+        - Header CSV: source_text, translated_text
+        - Headerless CSV: two columns per row (Frappe/ERPNext common format)
+        """
+        if not self.csv_path.exists():
+            return
+
+        # First try to sniff header by reading the first row.
+        try:
+            with open(self.csv_path, "r", encoding="utf-8", newline="") as f:
+                reader = csv.reader(f)
+                first = next(reader, None)
+                if not first:
+                    self._csv_has_header = False
+                    return
+
+                lowered = [c.strip().lower() for c in first]
+                # Common header variants
+                header_like = (
+                    ("source_text" in lowered and "translated_text" in lowered)
+                    or ("source" in lowered and "translation" in lowered)
+                    or ("source" in lowered and "translated" in lowered)
+                )
+
+                # If it looks like a header row, switch to DictReader (rewind the file).
+                if header_like:
+                    self._csv_has_header = True
+        except Exception:
+            # If we can't read it, let callers treat as empty.
+            return
+
+        # Header CSV
+        if self._csv_has_header:
+            try:
+                with open(self.csv_path, "r", encoding="utf-8", newline="") as f:
+                    dr = csv.DictReader(f)
+                    for row in dr:
+                        if not row:
+                            continue
+                        # Accept a few common fieldname variants
+                        src = (row.get("source_text") or row.get("source") or "").strip()
+                        tr = (row.get("translated_text") or row.get("translated") or row.get("translation") or "").strip()
+                        if src:
+                            yield (src, tr)
+                return
+            except Exception:
+                # Fall through to headerless parsing
+                self._csv_has_header = False
+
+        # Headerless CSV (default)
+        self._csv_has_header = False
+        try:
+            with open(self.csv_path, "r", encoding="utf-8", newline="") as f:
+                reader = csv.reader(f)
+                for row in reader:
+                    if not row:
+                        continue
+                    # Expect at least 2 columns; ignore extras
+                    if len(row) < 2:
+                        continue
+                    src = (row[0] or "").strip()
+                    tr = (row[1] or "").strip()
+                    if src:
+                        yield (src, tr)
+        except Exception:
+            return
 
     def _load_cache(self):
         """Load existing translations from CSV."""
         if not self.csv_path.exists():
+            self._csv_has_header = False
             return
 
+        # We intentionally do not normalize or rewrite keys here. Frappe looks up translations by the
+        # exact source_text, so preserving existing rows exactly is critical.
         try:
-            with open(self.csv_path, "r", encoding="utf-8", newline="") as f:
-                reader = csv.DictReader(f)
-                # Frappe standard CSV has: source_text, translated_text
-                # Our extended format may have additional columns
-                for row in reader:
-                    if "source_text" not in row or "translated_text" not in row:
-                        continue
-                    
-                    source_text = row["source_text"]
-                    translated_text = row["translated_text"]
-                    
-                    # Use context from row if available, otherwise create default
-                    context = TranslationContext(
-                        layer=row.get("layer", "A"),
-                        app=row.get("app"),
-                        doctype=row.get("doctype"),
-                        fieldname=row.get("fieldname"),
-                    )
-                    
-                    # Create key using source_text only (Frappe standard)
-                    # This allows merging with existing Frappe translation files
-                    key = self._make_key(source_text, "")
-                    
-                    self._cache[key] = TranslationEntry(
-                        source_text=source_text,
-                        translated_text=translated_text,
-                        context=context,
-                        source_file=row.get("source_file"),
-                        line_number=int(row.get("line_number", 0)),
-                    )
-        except Exception as e:
-            # Start fresh if CSV is corrupted
-            pass
+            for source_text, translated_text in self._iter_existing_rows():
+                context = TranslationContext(layer="A")
+                key = self._make_key(source_text, "")
+                self._cache[key] = TranslationEntry(
+                    source_text=source_text,
+                    translated_text=translated_text,
+                    context=context,
+                )
+        except Exception:
+            # Start fresh if CSV is corrupted/unreadable
+            self._cache = {}
+            if self._csv_has_header is None:
+                self._csv_has_header = False
 
     def _make_key(self, source_text: str, context_str: str = "") -> str:
         """Create cache key."""
@@ -143,6 +200,7 @@ class TranslationStorage:
         context: TranslationContext,
         source_file: Optional[str] = None,
         line_number: int = 0,
+        update_existing: bool = False,
     ):
         """
         Store translation.
@@ -153,10 +211,13 @@ class TranslationStorage:
             context: Translation context
             source_file: Source file path
             line_number: Line number
+            update_existing: If False, do not overwrite an existing translation for the same key.
         """
         # Frappe standard: use source_text as unique key
         # This allows overwriting existing translations and merging with Frappe files
         key = self._make_key(source_text, "")
+        if not update_existing and key in self._cache:
+            return
         entry = TranslationEntry(
             source_text=source_text,
             translated_text=translated_text,
@@ -167,52 +228,26 @@ class TranslationStorage:
         self._cache[key] = entry
 
     def save(self):
-        """Save all translations to CSV, preserving existing translations."""
-        # CRITICAL: Load existing translations from file first to preserve them
-        # This prevents deleting existing translations when adding new ones
-        existing_translations: Dict[str, str] = {}
-        if self.csv_path.exists():
-            try:
-                with open(self.csv_path, "r", encoding="utf-8", newline="") as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        if "source_text" in row and "translated_text" in row:
-                            source = row["source_text"].strip()
-                            translated = row["translated_text"].strip()
-                            if source and translated:
-                                # Normalize for comparison
-                                normalized_source = self._normalize_text(source)
-                                existing_translations[normalized_source] = translated
-            except Exception:
-                pass  # If file is corrupted, start fresh
-        
-        # Merge: existing translations + new translations from cache
-        all_translations: Dict[str, str] = {}
-        
-        # First, preserve ALL existing translations
-        for source, translated in existing_translations.items():
-            all_translations[source] = translated
-        
-        # Then, add/update with new translations from cache (only new ones)
-        for entry in self._cache.values():
-            normalized_text = self._normalize_text(entry.source_text)
-            # Add new translation (will override if same source_text exists)
-            all_translations[normalized_text] = entry.translated_text
-        
-        # Write merged translations to CSV - Frappe standard format
+        """Save all translations to CSV without deleting existing entries."""
+        # If we haven't detected header style yet (e.g., file didn't exist on init), default to
+        # headerless CSV for maximum Frappe compatibility.
+        if self._csv_has_header is None:
+            self._csv_has_header = False
+
+        # Sort by source_text for consistent output
+        entries = sorted(self._cache.values(), key=lambda e: (e.source_text or "").lower())
+
         with open(self.csv_path, "w", encoding="utf-8", newline="") as f:
-            fieldnames = ["source_text", "translated_text"]
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            
-            # Sort by source_text for consistent output
-            sorted_items = sorted(all_translations.items(), key=lambda x: x[0].lower())
-            
-            for source_text, translated_text in sorted_items:
-                writer.writerow({
-                    "source_text": source_text,
-                    "translated_text": translated_text,
-                })
+            if self._csv_has_header:
+                fieldnames = ["source_text", "translated_text"]
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                for e in entries:
+                    writer.writerow({"source_text": e.source_text, "translated_text": e.translated_text})
+            else:
+                writer = csv.writer(f)
+                for e in entries:
+                    writer.writerow([e.source_text, e.translated_text])
 
     def _normalize_text(self, text: str) -> str:
         """Normalize text for deduplication."""

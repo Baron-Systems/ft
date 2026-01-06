@@ -65,16 +65,15 @@ ai-translate erpnext --lang ar --site mysite
 
 **بعد التحديث:**
 ```bash
+# كلاهما يعمل:
+ai-translate erpnext --lang ar --site mysite
+# أو:
 ai-translate translate erpnext --lang ar --site mysite
 ```
 
-### 📝 أوامر جديدة
+### 📝 مراجعة مع وصف التطبيق (محسّن)
 
 ```bash
-# Audit الترجمات (جديد)
-ai-translate audit erpnext --lang ar
-
-# Review مع context (محسّن)
 ai-translate review erpnext --lang ar --context "ERP System"
 ```
 
@@ -99,7 +98,7 @@ ai-translate translate erpnext --lang ar --site mysite
 - ✅ لا حاجة لحذف التثبيت القديم - `--force` سيحدثه تلقائياً
 - ✅ الإعدادات والـ API key تبقى كما هي
 - ✅ الترجمات الموجودة محفوظة (لا يتم حذفها)
-- ⚠️ تذكر استخدام `translate` كـ subcommand الآن
+- ✅ يمكنك استخدام الاختصار: `ai-translate erpnext ...` (سيعمل كـ `translate`)
 
 ## إذا واجهت مشاكل
 

@@ -25,48 +25,27 @@ export GROQ_API_KEY="your-api-key-here"
 الاستخدام الأساسي:
 
 ```bash
-# ترجمة تطبيق واحد
-ai-translate translate erpnext --lang ar --site mysite
+# ترجمة تطبيق واحد (الاختصار: إذا كتبت اسم التطبيق مباشرة فهو يعادل `translate`)
+ai-translate erpnext --lang ar --site mysite
 
 # ترجمة عدة تطبيقات
-ai-translate translate erpnext,frappe --lang ar --site mysite
+ai-translate erpnext,frappe --lang ar --site mysite
 
 # مع تحديد bench path
-ai-translate translate erpnext --lang ar --site mysite --bench-path /path/to/bench
+ai-translate erpnext --lang ar --site mysite --bench-path /path/to/bench
 ```
 
 ### 2. خيارات الترجمة
 
 ```bash
-# ترجمة مع database content (Layers B & C)
-ai-translate translate erpnext --lang ar --site mysite --db-scope
-
-# ترجمة database content فقط (تخطي Layer A)
-ai-translate translate erpnext --lang ar --site mysite --db-scope-only
-
-# ترجمة DocTypes محددة فقط
-ai-translate translate erpnext --lang ar --site mysite --db-scope --db-doc-types "Workspace,Report,Dashboard"
-
 # وضع verbose للمزيد من المعلومات
-ai-translate translate erpnext --lang ar --site mysite --verbose
+ai-translate erpnext --lang ar --site mysite --verbose
 
 # وضع dry-run (لا يكتب أي شيء)
-ai-translate translate erpnext --lang ar --site mysite --dry-run
-
-# وضع slow-mode (rate limiting)
-ai-translate translate erpnext --lang ar --site mysite --slow-mode
+ai-translate erpnext --lang ar --site mysite --dry-run
 ```
 
-### 3. عرض Benches المتاحة
-
-```bash
-ai-translate list-benches
-
-# مع verbose
-ai-translate list-benches --verbose
-```
-
-### 4. مراجعة الترجمات
+### 3. مراجعة الترجمات
 
 ```bash
 # مراجعة جميع الترجمات
@@ -82,19 +61,6 @@ ai-translate review erpnext --lang ar --bench-path /path/to/bench
 ai-translate review erpnext --lang ar --status needs_review
 ```
 
-### 5. Audit الترجمات
-
-```bash
-# Audit شامل
-ai-translate audit erpnext --lang ar
-
-# مع verbose
-ai-translate audit erpnext --lang ar --verbose
-
-# مع bench path
-ai-translate audit erpnext --lang ar --bench-path /path/to/bench
-```
-
 ## أمثلة عملية
 
 ### مثال 1: ترجمة تطبيق ERPNext للعربية
@@ -103,28 +69,18 @@ ai-translate audit erpnext --lang ar --bench-path /path/to/bench
 # 1. تأكد من وجود API key
 export GROQ_API_KEY="your-key"
 
-# 2. ابحث عن benches
-ai-translate list-benches
+# 2. اترجم التطبيق (يضيف الناقص فقط ويحافظ على الموجود)
+ai-translate erpnext --lang ar --site mysite
 
-# 3. اترجم التطبيق
-ai-translate translate erpnext --lang ar --site mysite
-
-# 4. راجع الترجمات
+# 3. راجع الترجمات
 ai-translate review erpnext --lang ar --context "ERP System"
-
-# 5. تحقق من النتائج
-ai-translate audit erpnext --lang ar
 ```
 
 ### مثال 2: ترجمة مع database content
 
 ```bash
-# ترجمة كل شيء بما في ذلك database content
-ai-translate translate erpnext --lang ar --site mysite --db-scope
-
-# ترجمة Workspaces و Reports فقط
-ai-translate translate erpnext --lang ar --site mysite \
-  --db-scope --db-doc-types "Workspace,Report"
+# تمرير --site يجعل الأداة تشمل محتوى قاعدة البيانات تلقائياً (UI + User Content)
+ai-translate erpnext --lang ar --site mysite
 ```
 
 ### مثال 3: ترجمة عدة تطبيقات
@@ -175,22 +131,7 @@ apps/erpnext/erpnext/translations/ar_memory.json
 - SQL keywords
 - Logic-bearing content
 
-## Audit & Review
-
-### Audit Report
-
-```bash
-ai-translate audit erpnext --lang ar
-```
-
-يعرض:
-- إجمالي الترجمات
-- Rejection reasons
-- Translations by DocType
-- Translations needing review
-- Samples
-
-### Review System
+## Review System
 
 ```bash
 # عرض الترجمات التي تحتاج مراجعة
@@ -223,9 +164,6 @@ ai-translate translate erpnext -l ar -b /path/to/bench
 ### مشكلة: Bench path not found
 
 ```bash
-# استخدم list-benches للعثور على benches
-ai-translate list-benches
-
 # أو حدد bench path يدوياً
 ai-translate translate erpnext --lang ar --site mysite --bench-path /path/to/bench
 ```
@@ -299,27 +237,13 @@ prompt = contract.build_prompt(
 
 ## Best Practices
 
-1. **ابدأ بترجمة Layer A فقط**:
+1. **ابدأ بالترجمة ثم راجعها**:
    ```bash
-   ai-translate translate erpnext --lang ar --site mysite
-   ```
-
-2. **ثم أضف database content**:
-   ```bash
-   ai-translate translate erpnext --lang ar --site mysite --db-scope
-   ```
-
-3. **راجع الترجمات**:
-   ```bash
+   ai-translate erpnext --lang ar --site mysite
    ai-translate review erpnext --lang ar --context "ERP System"
    ```
 
-4. **تحقق من النتائج**:
-   ```bash
-   ai-translate audit erpnext --lang ar
-   ```
-
-5. **استخدم --dry-run أولاً**:
+2. **استخدم --dry-run أولاً**:
    ```bash
    ai-translate translate erpnext --lang ar --site mysite --dry-run
    ```

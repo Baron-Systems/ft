@@ -26,7 +26,7 @@ The tool now has **built-in support for Frappe Manager (fm)**:
 
 - Automatically detects benches via `fm bench list`
 - No need to specify `--bench-path` if using Frappe Manager
-- Use `ai-translate list-benches` to see all available benches
+- If auto-detection fails, pass `--bench-path /path/to/bench`
 
 See [INSTALLATION_FM.md](INSTALLATION_FM.md) for detailed instructions.
 
@@ -46,17 +46,11 @@ See [INSTALLATION_FM.md](INSTALLATION_FM.md) for detailed instructions.
 # 1. Set API key
 export GROQ_API_KEY="your-api-key-here"
 
-# 2. List available benches
-ai-translate list-benches
+# 2. Translate (adds missing only, preserves existing ar.csv)
+ai-translate erpnext --lang ar --site your-site-name
 
-# 3. Translate an app
-ai-translate translate erpnext --lang ar --site your-site-name
-
-# 4. Review translations
-ai-translate review erpnext --lang ar
-
-# 5. Audit translations
-ai-translate audit erpnext --lang ar
+# 3. Review translations with app context (meaning-based, not literal)
+ai-translate review erpnext --lang ar --context "Enterprise Resource Planning (ERP) System"
 ```
 
 ### Basic Commands
@@ -64,17 +58,11 @@ ai-translate audit erpnext --lang ar
 #### Translate
 
 ```bash
-# Basic translation
-ai-translate translate erpnext --lang ar --site mysite
+# Basic translation (shorthand defaults to `translate`)
+ai-translate erpnext --lang ar --site mysite
 
-# With database content
-ai-translate translate erpnext --lang ar --site mysite --db-scope
-
-# Database content only
-ai-translate translate erpnext --lang ar --site mysite --db-scope-only
-
-# Specific DocTypes
-ai-translate translate erpnext --lang ar --site mysite --db-scope --db-doc-types "Workspace,Report"
+# With app context (improves meaning-based translations)
+ai-translate erpnext --lang ar --site mysite --context "ERP System"
 ```
 
 #### Review
@@ -87,30 +75,13 @@ ai-translate review erpnext --lang ar
 ai-translate review erpnext --lang ar --context "ERP System"
 ```
 
-#### Audit
-
-```bash
-# Audit translations
-ai-translate audit erpnext --lang ar
-```
-
-#### List Benches
-
-```bash
-# List all available benches
-ai-translate list-benches
-```
-
 ### Options
 
 - `--lang, -l`: Target language code (required)
 - `--site, -s`: Site name (required for database layers)
+- `--context, -c`: App description/context for better translations
 - `--bench-path, -b`: Path to bench directory
-- `--db-scope`: Include database content (Layers B & C)
-- `--db-scope-only`: Only process database content
-- `--db-doc-types`: Comma-separated allowlist of DocTypes
 - `--verbose, -v`: Verbose output
-- `--slow-mode`: Enable rate limiting
 - `--dry-run`: Preview without making changes
 
 ## Architecture
@@ -193,7 +164,6 @@ The tool writes **only** to the Translation DocType. Original records are never 
 - Fallback mechanisms
 
 ### Audit & Review
-- Comprehensive audit reports
 - Review system with approval/rejection
 - Confidence tracking
 - Needs review flagging
@@ -203,25 +173,13 @@ The tool writes **only** to the Translation DocType. Original records are never 
 ### Translate ERPNext to Arabic
 
 ```bash
-ai-translate translate erpnext --lang ar --site production
-```
-
-### Translate with Database Content
-
-```bash
-ai-translate translate erpnext --lang ar --site production --db-scope
+ai-translate erpnext --lang ar --site production
 ```
 
 ### Review Translations
 
 ```bash
 ai-translate review erpnext --lang ar --context "ERP System"
-```
-
-### Audit Translations
-
-```bash
-ai-translate audit erpnext --lang ar --verbose
 ```
 
 ## Development

@@ -17,25 +17,13 @@ export GROQ_API_KEY="your-api-key-here"
 ### ترجمة تطبيق
 
 ```bash
-ai-translate translate erpnext --lang ar --site mysite
-```
-
-### عرض Benches المتاحة
-
-```bash
-ai-translate list-benches
+ai-translate erpnext --lang ar --site mysite
 ```
 
 ### مراجعة الترجمات
 
 ```bash
-ai-translate review erpnext --lang ar
-```
-
-### Audit الترجمات
-
-```bash
-ai-translate audit erpnext --lang ar
+ai-translate review erpnext --lang ar --context "ERP System"
 ```
 
 ## 4. أمثلة سريعة
@@ -43,30 +31,17 @@ ai-translate audit erpnext --lang ar
 ### مثال كامل
 
 ```bash
-# 1. ابحث عن benches
-ai-translate list-benches
+# 1. اترجم التطبيق (يضيف الناقص فقط ويحافظ على الموجود)
+ai-translate erpnext --lang ar --site mysite
 
-# 2. اترجم التطبيق
-ai-translate translate erpnext --lang ar --site mysite
-
-# 3. راجع الترجمات
+# 2. راجع الترجمات مع وصف للتطبيق لتحسين المعنى
 ai-translate review erpnext --lang ar --context "ERP System"
-
-# 4. تحقق من النتائج
-ai-translate audit erpnext --lang ar
 ```
 
 ### مع database content
 
 ```bash
-ai-translate translate erpnext --lang ar --site mysite --db-scope
-```
-
-### DocTypes محددة
-
-```bash
-ai-translate translate erpnext --lang ar --site mysite \
-  --db-scope --db-doc-types "Workspace,Report"
+ai-translate erpnext --lang ar --site mysite
 ```
 
 ## 5. أين توجد الترجمات؟
@@ -94,7 +69,6 @@ ai-translate translate erpnext -l ar -b /path/to/bench
 ai-translate --help
 ai-translate translate --help
 ai-translate review --help
-ai-translate audit --help
 ```
 
 ---

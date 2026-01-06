@@ -81,6 +81,7 @@ class ReviewManager:
             entry.context,
             entry.source_file,
             entry.line_number,
+            update_existing=True,
         )
         self.storage.save()
         
@@ -130,6 +131,7 @@ class ReviewManager:
             entry.context,
             entry.source_file,
             entry.line_number,
+            update_existing=True,
         )
         self.storage.save()
         
@@ -170,6 +172,7 @@ class ReviewManager:
             entry.context,
             entry.source_file,
             entry.line_number,
+            update_existing=True,
         )
         self.storage.save()
         
