@@ -24,15 +24,15 @@ app = typer.Typer(
     name="ai-translate",
     help="AI-powered translation system for Frappe / ERPNext",
     add_completion=False,
-    invoke_without_command=True,
 )
 console = Console()
 
 
-@app.command()
+@app.callback(invoke_without_command=True)
 def translate(
-    apps: str = typer.Argument(..., help="App name(s) to translate (comma-separated)"),
-    lang: str = typer.Option(..., "--lang", help="Target language code (e.g., 'ar', 'es', 'fr')"),
+    ctx: typer.Context,
+    apps: Optional[str] = typer.Argument(None, help="App name(s) to translate (comma-separated)"),
+    lang: Optional[str] = typer.Option(None, "--lang", help="Target language code (e.g., 'ar', 'es', 'fr')"),
     site: Optional[str] = typer.Option(None, "--site", help="Site name (optional, for database content)"),
     bench_path: Optional[str] = typer.Option(None, "--bench-path", help="Path to bench directory"),
     verbose: bool = typer.Option(False, "--verbose", help="Verbose output"),
@@ -50,6 +50,27 @@ def translate(
     Example:
         ai-translate erpnext --lang ar --site mysite
     """
+    # If a subcommand was invoked (like 'review' or 'list-benches'), don't run translate
+    if ctx.invoked_subcommand is not None:
+        return
+    
+    # Validate required arguments
+    if not apps:
+        output = OutputFilter(verbose=verbose)
+        output.error("App name(s) required")
+        output.info("\nUsage:")
+        output.info("  ai-translate <apps> --lang <lang> [--site <site>]")
+        output.info("\nExample:")
+        output.info("  ai-translate erpnext --lang ar --site mysite")
+        sys.exit(1)
+    
+    if not lang:
+        output = OutputFilter(verbose=verbose)
+        output.error("--lang is required")
+        output.info("\nUsage:")
+        output.info("  ai-translate <apps> --lang <lang> [--site <site>]")
+        sys.exit(1)
+    
     # Initialize output
     output = OutputFilter(verbose=verbose)
 
