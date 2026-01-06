@@ -30,7 +30,7 @@ export GROQ_API_KEY="gsk_xxxxxxxxxxxxx"
 # الأداة تدعم Frappe Manager تلقائياً!
 ai-translate list-benches
 # أو
-fm bench list
+fm list
 
 # تشغيل الترجمة (مع Frappe Manager - لا حاجة لـ --bench-path)
 ai-translate \
@@ -54,17 +54,17 @@ ai-translate \
 
 الأداة تدعم **Frappe Manager (fm)** تلقائياً:
 
-- ✅ اكتشاف تلقائي لـ benches من `fm bench list`
+- ✅ اكتشاف تلقائي لـ benches من `fm list`
 - ✅ لا حاجة لتحديد `--bench-path` عند استخدام Frappe Manager
 - ✅ استخدم `ai-translate list-benches` لعرض جميع benches المتاحة
 
-## دعم Frappe Manager / Frappe Manager Support
+**⚠️ مهم:** استخدم `ai-translate` **خارج** `fm shell` لأن PATH داخل `fm shell` قد لا يحتوي على pipx binaries.
 
-الأداة تدعم **Frappe Manager (fm)** تلقائياً:
-
-- ✅ اكتشاف تلقائي لـ benches من `fm bench list`
-- ✅ لا حاجة لتحديد `--bench-path` عند استخدام Frappe Manager
-- ✅ استخدم `ai-translate list-benches` لعرض جميع benches المتاحة
+إذا كنت داخل `fm shell`:
+```bash
+exit  # اخرج من fm shell
+ai-translate --apps frappe --lang ar --site site-name
+```
 
 ## ملاحظات مهمة / Important Notes
 

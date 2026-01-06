@@ -316,8 +316,9 @@ def list_benches(
     output.info("Searching for benches...")
     
     benches_found = []
+    benches_set = set()
     
-    # Try Frappe Manager
+    # Try Frappe Manager - 'fm bench list'
     try:
         result = subprocess.run(
             ["fm", "bench", "list"],
@@ -326,20 +327,70 @@ def list_benches(
             timeout=10,
         )
         if result.returncode == 0:
-            output.success("Frappe Manager benches found:")
+            output.success("Frappe Manager benches found (fm bench list):")
             for line in result.stdout.splitlines():
                 if "->" in line:
                     parts = line.split("->")
                     if len(parts) == 2:
                         bench_name = parts[0].strip()
-                        bench_path = Path(parts[1].strip())
+                        bench_path = Path(parts[1].strip()).resolve()
                         if bench_path.exists() and (bench_path / "sites").exists():
+                            benches_set.add(bench_path)
                             benches_found.append((bench_name, bench_path))
                             output.info(f"  {bench_name} -> {bench_path}")
     except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    except Exception as e:
+        if verbose:
+            output.warning(f"Error checking 'fm bench list': {e}")
+    
+    # Try Frappe Manager - 'fm list' (sites)
+    try:
+        result = subprocess.run(
+            ["fm", "list"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            # Parse table output to extract bench paths from site paths
+            site_paths = []
+            for line in result.stdout.splitlines():
+                if "/sites/" in line or "/frappe/" in line:
+                    parts = line.split()
+                    for part in parts:
+                        if "/sites/" in part:
+                            site_path = Path(part.strip())
+                            if site_path.exists():
+                                site_paths.append(site_path)
+            
+            if site_paths:
+                output.success("Frappe Manager sites found (fm list):")
+                # Extract unique bench paths
+                for site_path in site_paths:
+                    # Try to find bench directory
+                    potential_bench = site_path.parent
+                    if (potential_bench / "sites").exists() and (potential_bench / "apps").exists():
+                        bench_path = potential_bench.resolve()
+                        if bench_path not in benches_set:
+                            benches_set.add(bench_path)
+                            site_name = site_path.name
+                            benches_found.append((f"bench (site: {site_name})", bench_path))
+                            output.info(f"  Site: {site_name} -> Bench: {bench_path}")
+                    # Also check parent's parent
+                    potential_bench2 = potential_bench.parent
+                    if (potential_bench2 / "sites").exists() and (potential_bench2 / "apps").exists():
+                        bench_path = potential_bench2.resolve()
+                        if bench_path not in benches_set:
+                            benches_set.add(bench_path)
+                            site_name = site_path.name
+                            benches_found.append((f"bench (site: {site_name})", bench_path))
+                            output.info(f"  Site: {site_name} -> Bench: {bench_path}")
+    except (subprocess.TimeoutExpired, FileNotFoundError):
         output.info("Frappe Manager (fm) not available")
     except Exception as e:
-        output.warning(f"Error checking Frappe Manager: {e}")
+        if verbose:
+            output.warning(f"Error checking 'fm list': {e}")
     
     # Check current directory
     cwd = Path.cwd()

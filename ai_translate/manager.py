@@ -33,8 +33,10 @@ class BenchManager:
             List of bench paths found via fm
         """
         benches = []
+        benches_set = set()  # To avoid duplicates
+        
         try:
-            # Try to run 'fm bench list'
+            # Try 'fm bench list' first (if it exists)
             result = subprocess.run(
                 ["fm", "bench", "list"],
                 capture_output=True,
@@ -49,11 +51,54 @@ class BenchManager:
                         if len(parts) == 2:
                             bench_path = Path(parts[1].strip())
                             if bench_path.exists() and (bench_path / "sites").exists():
-                                benches.append(bench_path)
-                                self.output.info(f"Found Frappe Manager bench: {bench_path}", verbose_only=True)
-        except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
-            # fm command not found or failed - that's okay
-            self.output.info("Frappe Manager (fm) not available", verbose_only=True)
+                                benches_set.add(bench_path.resolve())
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        except Exception:
+            pass
+        
+        # Try 'fm list' to get sites and extract bench paths
+        try:
+            result = subprocess.run(
+                ["fm", "list"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                # Parse table output - look for Path column
+                for line in result.stdout.splitlines():
+                    # Look for paths that contain "sites"
+                    if "/sites/" in line or "/frappe/" in line:
+                        # Extract path from line
+                        parts = line.split()
+                        for part in parts:
+                            if "/sites/" in part or "/frappe/" in part:
+                                site_path = Path(part.strip())
+                                if site_path.exists():
+                                    # Extract bench path from site path
+                                    # Site path: /home/baron/frappe/sites/site-name
+                                    # Bench path: /home/baron/frappe-bench (or /home/baron/frappe)
+                                    if site_path.name == "sites" or "sites" in str(site_path):
+                                        # Go up to find bench directory
+                                        potential_bench = site_path.parent
+                                        if (potential_bench / "sites").exists():
+                                            benches_set.add(potential_bench.resolve())
+                                        # Also check if parent is bench
+                                        potential_bench2 = potential_bench.parent
+                                        if (potential_bench2 / "sites").exists():
+                                            benches_set.add(potential_bench2.resolve())
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        except Exception:
+            pass
+        
+        # Convert set to list and validate
+        for bench_path in benches_set:
+            if bench_path.exists() and (bench_path / "sites").exists():
+                benches.append(bench_path)
+                self.output.info(f"Found Frappe Manager bench: {bench_path}", verbose_only=True)
+        
         return benches
 
     def _find_bench_path(self, bench_path: Optional[str]) -> Optional[Path]:
@@ -94,11 +139,39 @@ class BenchManager:
                 self.output.info(f"Found bench in parent directory: {parent}", verbose_only=True)
                 return parent
 
-        # 5. Try common Frappe Manager locations
+        # 5. Try to extract bench from Frappe Manager site paths
+        try:
+            result = subprocess.run(
+                ["fm", "list"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                # Parse output to find site paths and extract bench
+                for line in result.stdout.splitlines():
+                    if "/sites/" in line or "/frappe/" in line:
+                        parts = line.split()
+                        for part in parts:
+                            if "/sites/" in part:
+                                site_path = Path(part.strip())
+                                if site_path.exists():
+                                    # Try parent directories
+                                    for parent in [site_path.parent, site_path.parent.parent]:
+                                        if (parent / "sites").exists() and (parent / "apps").exists():
+                                            self.output.info(f"Found bench from Frappe Manager site: {parent}", verbose_only=True)
+                                            return parent.resolve()
+        except Exception:
+            pass
+        
+        # 6. Try common Frappe Manager locations
         common_paths = [
             Path.home() / "frappe-bench",
+            Path.home() / "frappe",
             Path("/home/frappe/frappe-bench"),
+            Path("/home/frappe/frappe"),
             Path("/opt/frappe/frappe-bench"),
+            Path("/opt/frappe/frappe"),
         ]
         for path in common_paths:
             if path.exists() and (path / "sites").exists():

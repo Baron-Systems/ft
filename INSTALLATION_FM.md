@@ -49,9 +49,11 @@ fm bench list
 
 #### 4. استخدام الأداة:
 
+**⚠️ مهم:** استخدم `ai-translate` **خارج** `fm shell` لأن PATH داخل `fm shell` قد لا يحتوي على pipx binaries.
+
 ```bash
 # الطريقة الأولى: استخدام Frappe Manager تلقائياً (موصى بها)
-# الأداة ستكتشف bench تلقائياً من fm
+# الأداة ستكتشف bench تلقائياً من fm list
 ai-translate \
   --apps frappe \
   --lang ar \
@@ -68,6 +70,14 @@ ai-translate \
 cd /home/frappe/frappe-bench
 ai-translate --apps frappe --lang ar --site your-site-name
 ```
+
+**ملاحظة:** إذا كنت داخل `fm shell` و `ai-translate` غير متاح:
+1. اخرج من `fm shell` (اكتب `exit`)
+2. استخدم `ai-translate` من shell العادي
+3. أو أضف pipx bin directory إلى PATH داخل `fm shell`:
+   ```bash
+   export PATH="$HOME/.local/bin:$PATH"
+   ```
 
 ---
 
@@ -120,9 +130,11 @@ fm bench list
 
 #### 4. Use the Tool:
 
+**⚠️ Important:** Use `ai-translate` **outside** `fm shell` because PATH inside `fm shell` may not include pipx binaries.
+
 ```bash
 # Method 1: Use Frappe Manager automatically (recommended)
-# The tool will auto-detect bench from fm
+# The tool will auto-detect bench from fm list
 ai-translate \
   --apps frappe \
   --lang ar \
@@ -139,6 +151,14 @@ ai-translate \
 cd /home/frappe/frappe-bench
 ai-translate --apps frappe --lang ar --site your-site-name
 ```
+
+**Note:** If you're inside `fm shell` and `ai-translate` is not found:
+1. Exit `fm shell` (type `exit`)
+2. Use `ai-translate` from regular shell
+3. Or add pipx bin directory to PATH inside `fm shell`:
+   ```bash
+   export PATH="$HOME/.local/bin:$PATH"
+   ```
 
 ## Common Frappe Manager Bench Locations
 
@@ -180,13 +200,39 @@ Use `--bench-path` explicitly:
 ai-translate --bench-path /path/to/your/bench --apps frappe --lang ar --site site-name
 ```
 
+To find your bench path from Frappe Manager:
+
+```bash
+# List sites and extract bench path
+fm list
+# Look for Path column - bench is usually parent of sites directory
+# Example: /home/baron/frappe/sites/site-name -> bench is /home/baron/frappe-bench
+```
+
 ### Verify Bench Path
 
-Check if the path contains `sites` directory:
+Check if the path contains `sites` and `apps` directories:
 
 ```bash
 ls /path/to/bench/sites
+ls /path/to/bench/apps
 ```
 
-If this directory exists, the path is correct.
+If both directories exist, the path is correct.
+
+### Command Not Found Inside fm shell
+
+If `ai-translate` is not found inside `fm shell`:
+
+1. **Exit fm shell and use regular shell** (recommended):
+   ```bash
+   exit  # Exit fm shell
+   ai-translate --apps frappe --lang ar --site site-name
+   ```
+
+2. **Or add pipx to PATH inside fm shell**:
+   ```bash
+   export PATH="$HOME/.local/bin:$PATH"
+   ai-translate --apps frappe --lang ar --site site-name
+   ```
 
