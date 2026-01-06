@@ -217,13 +217,18 @@ class Translator:
         context: Optional[str],
     ) -> str:
         """Build translation prompt."""
-        # Use a cleaner, more direct prompt
-        prompt = f"""Translate the following text from {source_lang} to {target_lang}.
+        # Build context-aware prompt
+        context_part = ""
+        if context:
+            context_part = f"\nContext: This text is from a {context}. Translate according to the meaning and context, not literally."
+        
+        prompt = f"""Translate the following text from {source_lang} to {target_lang}.{context_part}
 
 Rules:
 - Preserve ALL placeholders exactly as they appear (e.g., {{0}}, {{1}}, %(name)s, {{{{ var }}}})
 - Keep the same formatting and structure
 - Do NOT translate technical terms, code, URLs, or email addresses
+- Translate according to meaning and context, not word-by-word
 - Return ONLY the translated text, no explanations, no instructions, no additional text
 
 Text: {text}

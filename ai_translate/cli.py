@@ -29,68 +29,26 @@ app = typer.Typer(
 console = Console()
 
 
-@app.callback(invoke_without_command=True)
+@app.command()
 def translate(
-    apps: Optional[str] = typer.Option(
-        None,
-        "--apps",
-        help="Comma-separated list of app names",
-    ),
-    all_apps: bool = typer.Option(
-        False,
-        "--all-apps",
-        help="Process all apps",
-    ),
-    lang: str = typer.Option(
-        ...,
-        "--lang",
-        help="Target language code (e.g., 'es', 'fr', 'de')",
-    ),
-    site: Optional[str] = typer.Option(
-        None,
-        "--site",
-        help="Site name (required for Layers B & C)",
-    ),
-    layers: Optional[str] = typer.Option(
-        "A",
-        "--layers",
-        help="Comma-separated layers to process (A, B, C)",
-    ),
-    fix_missing: bool = typer.Option(
-        False,
-        "--fix-missing",
-        help="Fix missing translations",
-    ),
-    dry_run: bool = typer.Option(
-        False,
-        "--dry-run",
-        help="Dry run mode (no writes)",
-    ),
-    slow_mode: bool = typer.Option(
-        False,
-        "--slow-mode",
-        help="Enable slow mode (rate limiting)",
-    ),
-    update_existing: bool = typer.Option(
-        False,
-        "--update-existing",
-        help="Update existing translations",
-    ),
-    verbose: bool = typer.Option(
-        False,
-        "--verbose",
-        help="Verbose output",
-    ),
-    bench_path: Optional[str] = typer.Option(
-        None,
-        "--bench-path",
-        help="Path to bench directory",
-    ),
+    apps: str = typer.Argument(..., help="App name(s) to translate (comma-separated)"),
+    lang: str = typer.Option(..., "--lang", help="Target language code (e.g., 'ar', 'es', 'fr')"),
+    site: Optional[str] = typer.Option(None, "--site", help="Site name (optional, for database content)"),
+    bench_path: Optional[str] = typer.Option(None, "--bench-path", help="Path to bench directory"),
+    verbose: bool = typer.Option(False, "--verbose", help="Verbose output"),
 ):
     """
-    AI-powered translation system for Frappe / ERPNext.
-
-    Requires GROQ_API_KEY environment variable.
+    Translate app(s) - extracts all user-visible strings and translates missing ones.
+    
+    Automatically extracts from:
+    - Code files (Python, JavaScript, HTML)
+    - JSON fixtures (DocTypes, Workspaces, Reports, etc.)
+    - Database content (if --site is provided)
+    
+    Only translates missing strings - preserves existing translations.
+    
+    Example:
+        ai-translate erpnext --lang ar --site mysite
     """
     # Initialize output
     output = OutputFilter(verbose=verbose)
@@ -101,23 +59,12 @@ def translate(
         output.error("GROQ_API_KEY environment variable is required")
         sys.exit(1)
 
-    # Parse layers
-    layer_list = [l.strip().upper() for l in layers.split(",") if l.strip()]
-    if not layer_list:
-        output.error("At least one layer must be specified")
-        sys.exit(1)
-
-    # Validate layers
-    valid_layers = {"A", "B", "C"}
-    invalid_layers = set(layer_list) - valid_layers
-    if invalid_layers:
-        output.error(f"Invalid layers: {invalid_layers}")
-        sys.exit(1)
-
-    # Check site requirement for Layers B & C
-    if ({"B", "C"} & set(layer_list)) and not site:
-        output.error("--site is required for Layers B & C")
-        sys.exit(1)
+    # Automatically process all layers (A, B, C)
+    # Layer A: Code & Files (always)
+    # Layers B & C: Database content (if site provided)
+    layer_list = ["A"]  # Always include Layer A
+    if site:
+        layer_list.extend(["B", "C"])  # Add database layers if site provided
 
     # Initialize bench manager
     bench_manager = BenchManager(bench_path=bench_path, output=output)
@@ -135,15 +82,8 @@ def translate(
 
     output.info(f"Bench path: {bench_manager.bench_path}")
 
-    # Get apps to process
-    app_names = []
-    if all_apps:
-        app_names = bench_manager.get_apps(all_apps=True)
-    elif apps:
-        app_names = bench_manager.get_apps(app_names=apps.split(","))
-    else:
-        output.error("Either --apps or --all-apps must be specified")
-        sys.exit(1)
+    # Parse app names
+    app_names = [a.strip() for a in apps.split(",") if a.strip()]
 
     if not app_names:
         output.error("No apps found to process")
@@ -153,9 +93,7 @@ def translate(
 
     # Initialize translator
     try:
-        translator = Translator(
-            api_key=api_key, slow_mode=slow_mode, output=output
-        )
+        translator = Translator(api_key=api_key, slow_mode=False, output=output)
     except Exception as e:
         output.error(f"Failed to initialize translator: {e}")
         sys.exit(1)
@@ -468,6 +406,109 @@ def list_benches(
     else:
         output.success(f"\nFound {len(benches_found)} bench(es)")
         output.info("\nUse --bench-path to specify which bench to use")
+
+
+@app.command(name="review")
+def review_translations(
+    apps: str = typer.Argument(..., help="App name(s) to review (comma-separated)"),
+    lang: str = typer.Option(..., "--lang", help="Language code to review"),
+    app_description: Optional[str] = typer.Option(None, "--context", help="App description/context for better translation (e.g., 'Human Resources Management System')"),
+    bench_path: Optional[str] = typer.Option(None, "--bench-path", help="Path to bench directory"),
+    verbose: bool = typer.Option(False, "--verbose", help="Verbose output"),
+):
+    """
+    Review and improve translations with AI context.
+    
+    Allows you to provide app context/description to improve translations
+    based on meaning and context rather than literal translation.
+    
+    Example:
+        ai-translate review erpnext --lang ar --context "Enterprise Resource Planning System"
+    """
+    output = OutputFilter(verbose=verbose)
+    
+    # Check API key
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        output.error("GROQ_API_KEY environment variable is required")
+        sys.exit(1)
+    
+    # Initialize bench manager
+    bench_manager = BenchManager(bench_path=bench_path, output=output)
+    if not bench_manager.bench_path:
+        output.error("Could not find bench directory")
+        sys.exit(1)
+    
+    # Parse app names
+    app_names = [a.strip() for a in apps.split(",") if a.strip()]
+    if not app_names:
+        output.error("At least one app name must be specified")
+        sys.exit(1)
+    
+    # Initialize translator with context
+    try:
+        translator = Translator(api_key=api_key, slow_mode=False, output=output)
+    except Exception as e:
+        output.error(f"Failed to initialize translator: {e}")
+        sys.exit(1)
+    
+    output.info(f"Reviewing translations for: {', '.join(app_names)}")
+    if app_description:
+        output.info(f"App context: {app_description}")
+    
+    # Process each app
+    for app_name in app_names:
+        app_path = bench_manager.get_app_path(app_name)
+        if not app_path:
+            output.warning(f"App path not found: {app_name}")
+            continue
+        
+        app_translations_path = app_path / app_name / "translations"
+        storage = TranslationStorage(storage_path=app_translations_path, lang=lang)
+        
+        if not storage.csv_path.exists():
+            output.warning(f"Translation file not found: {storage.csv_path}")
+            continue
+        
+        output.info(f"\nReviewing: {app_name}")
+        output.info(f"Translation file: {storage.csv_path}")
+        
+        # Load all translations
+        all_entries = storage.get_all()
+        output.info(f"Found {len(all_entries)} translations")
+        
+        if not all_entries:
+            output.info("No translations to review")
+            continue
+        
+        # Review each translation
+        reviewed_count = 0
+        with ProgressTracker(total=len(all_entries), description="Reviewing") as progress:
+            for entry in all_entries:
+                # Re-translate with context
+                translated, status = translator.translate(
+                    entry.source_text,
+                    lang,
+                    source_lang="en",
+                    context=app_description
+                )
+                
+                if status == "ok" and translated and translated != entry.translated_text:
+                    # Update if translation improved
+                    storage.set(
+                        entry.source_text,
+                        translated,
+                        entry.context,
+                        entry.source_file,
+                        entry.line_number,
+                    )
+                    reviewed_count += 1
+                
+                progress.update()
+        
+        # Save reviewed translations
+        storage.save()
+        output.success(f"✓ Reviewed {reviewed_count} translations for {app_name}")
 
 
 def cli_entrypoint():

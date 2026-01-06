@@ -151,42 +151,51 @@ class TranslationStorage:
         self._cache[key] = entry
 
     def save(self):
-        """Save all translations to CSV."""
-        if not self._cache:
-            return
-
-        # Normalize and deduplicate by source_text (Frappe standard)
-        normalized: Dict[str, TranslationEntry] = {}
+        """Save all translations to CSV, preserving existing translations."""
+        # CRITICAL: Load existing translations from file first to preserve them
+        # This prevents deleting existing translations when adding new ones
+        existing_translations: Dict[str, str] = {}
+        if self.csv_path.exists():
+            try:
+                with open(self.csv_path, "r", encoding="utf-8", newline="") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        if "source_text" in row and "translated_text" in row:
+                            source = row["source_text"].strip()
+                            translated = row["translated_text"].strip()
+                            if source and translated:
+                                # Normalize for comparison
+                                normalized_source = self._normalize_text(source)
+                                existing_translations[normalized_source] = translated
+            except Exception:
+                pass  # If file is corrupted, start fresh
+        
+        # Merge: existing translations + new translations from cache
+        all_translations: Dict[str, str] = {}
+        
+        # First, preserve ALL existing translations
+        for source, translated in existing_translations.items():
+            all_translations[source] = translated
+        
+        # Then, add/update with new translations from cache (only new ones)
         for entry in self._cache.values():
-            # Use source_text as unique key (Frappe standard)
-            # If duplicate, keep the most recent one
             normalized_text = self._normalize_text(entry.source_text)
-            key = self._make_key(normalized_text, "")
-            if key not in normalized:
-                normalized[key] = entry
-            else:
-                # Update if we have a newer translation
-                normalized[key] = entry
-
-        # Write to CSV - Frappe standard format: source_text, translated_text
-        # We use minimal format compatible with Frappe's translation system
+            # Add new translation (will override if same source_text exists)
+            all_translations[normalized_text] = entry.translated_text
+        
+        # Write merged translations to CSV - Frappe standard format
         with open(self.csv_path, "w", encoding="utf-8", newline="") as f:
-            # Frappe standard: only source_text and translated_text
-            # Additional columns are optional metadata
-            fieldnames = [
-                "source_text",
-                "translated_text",
-            ]
+            fieldnames = ["source_text", "translated_text"]
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             
             # Sort by source_text for consistent output
-            sorted_entries = sorted(normalized.values(), key=lambda e: e.source_text.lower())
+            sorted_items = sorted(all_translations.items(), key=lambda x: x[0].lower())
             
-            for entry in sorted_entries:
+            for source_text, translated_text in sorted_items:
                 writer.writerow({
-                    "source_text": entry.source_text,
-                    "translated_text": entry.translated_text,
+                    "source_text": source_text,
+                    "translated_text": translated_text,
                 })
 
     def _normalize_text(self, text: str) -> str:
