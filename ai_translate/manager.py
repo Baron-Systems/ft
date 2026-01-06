@@ -269,6 +269,59 @@ class BenchManager:
 
         return []
 
+    def get_bench_path_from_site(self, site_name: str) -> Optional[Path]:
+        """
+        Get bench path from site name using Frappe Manager.
+        
+        Args:
+            site_name: Site name
+            
+        Returns:
+            Bench path or None
+        """
+        # Try Frappe Manager 'fm list' to get site path
+        try:
+            result = subprocess.run(
+                ["fm", "list"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                # Parse table output - look for site name and extract path
+                for line in result.stdout.splitlines():
+                    # Check if this line contains the site name
+                    if site_name in line:
+                        # Extract path from line
+                        parts = line.split()
+                        for part in parts:
+                            if "/sites/" in part or "/frappe/" in part:
+                                site_path = Path(part.strip())
+                                if site_path.exists() and site_path.name == site_name:
+                                    # Frappe Manager structure:
+                                    # Site path: /home/baron/frappe/sites/site-name
+                                    # Bench path: /home/baron/frappe/sites/site-name/workspace/frappe-bench
+                                    
+                                    # First, check workspace/frappe-bench pattern (Frappe Manager)
+                                    workspace_bench = site_path / "workspace" / "frappe-bench"
+                                    if workspace_bench.exists() and (workspace_bench / "sites").exists() and (workspace_bench / "apps").exists():
+                                        return workspace_bench.resolve()
+                                    
+                                    # Also check if site_path itself contains bench structure
+                                    # Check parent directories for bench structure
+                                    current = site_path.parent  # /home/baron/frappe/sites
+                                    if current.name == "sites":
+                                        parent = current.parent  # /home/baron/frappe
+                                        # Check if parent has both sites and apps (legacy bench)
+                                        if (parent / "sites").exists() and (parent / "apps").exists():
+                                            return parent.resolve()
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        except Exception:
+            pass
+        
+        return None
+
     def get_site_path(self, site_name: str) -> Optional[Path]:
         """
         Get site path.
@@ -279,6 +332,14 @@ class BenchManager:
         Returns:
             Site path or None
         """
+        # First try Frappe Manager to get site path
+        bench_path = self.get_bench_path_from_site(site_name)
+        if bench_path:
+            site_path = bench_path / "sites" / site_name
+            if site_path.exists():
+                return site_path
+        
+        # Fallback to current bench_path
         if not self.sites_path:
             return None
         site_path = self.sites_path / site_name

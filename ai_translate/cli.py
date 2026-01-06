@@ -24,6 +24,7 @@ app = typer.Typer(
     name="ai-translate",
     help="AI-powered translation system for Frappe / ERPNext",
     add_completion=False,
+    no_args_is_help=False,
 )
 console = Console()
 
@@ -31,8 +32,8 @@ console = Console()
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
-    apps: Optional[str] = typer.Argument(None, help="App name(s) to translate (comma-separated)"),
-    lang: Optional[str] = typer.Option(None, "--lang", help="Target language code (e.g., 'ar', 'es', 'fr')"),
+    apps: str = typer.Argument(..., help="App name(s) to translate (comma-separated)"),
+    lang: str = typer.Option(..., "--lang", help="Target language code (e.g., 'ar', 'es', 'fr')"),
     site: Optional[str] = typer.Option(None, "--site", help="Site name (optional, for database content)"),
     bench_path: Optional[str] = typer.Option(None, "--bench-path", help="Path to bench directory"),
     verbose: bool = typer.Option(False, "--verbose", help="Verbose output"),
@@ -46,25 +47,11 @@ def main(
     Example:
         ai-translate erpnext --lang ar --site mysite
     """
-    # If a subcommand was invoked, don't run translate
-    if ctx.invoked_subcommand is not None:
-        return
-    
-    # If apps and lang are provided, run translate
-    if apps and lang:
-        translate(apps=apps, lang=lang, site=site, bench_path=bench_path, verbose=verbose)
-    elif not apps or not lang:
-        # Show error if required args missing
-        output = OutputFilter(verbose=verbose)
-        output.error("App name(s) and --lang are required")
-        output.info("\nUsage:")
-        output.info("  ai-translate <apps> --lang <lang> [--site <site>]")
-        output.info("\nExample:")
-        output.info("  ai-translate erpnext --lang ar --site mysite")
-        sys.exit(1)
+    if ctx.invoked_subcommand is None:
+        _translate_impl(apps=apps, lang=lang, site=site, bench_path=bench_path, verbose=verbose)
 
 
-def translate(
+def _translate_impl(
     apps: str,
     lang: str,
     site: Optional[str],
@@ -72,7 +59,7 @@ def translate(
     verbose: bool,
 ):
     """
-    Translate app(s) - extracts all user-visible strings and translates missing ones.
+    Implementation of translate command.
     
     Automatically extracts from:
     - Code files (Python, JavaScript, HTML)
@@ -99,17 +86,27 @@ def translate(
         layer_list.extend(["B", "C"])  # Add database layers if site provided
 
     # Initialize bench manager
+    # If site is provided but bench_path is not, try to get bench from site name using Frappe Manager
+    if site and not bench_path:
+        temp_manager = BenchManager(bench_path=None, output=output)
+        bench_from_site = temp_manager.get_bench_path_from_site(site)
+        if bench_from_site:
+            bench_path = str(bench_from_site)
+            output.info(f"Found bench from site '{site}': {bench_path}", verbose_only=True)
+    
     bench_manager = BenchManager(bench_path=bench_path, output=output)
     if not bench_manager.bench_path:
         output.error("Could not find bench directory")
         output.info("")
         output.info("Tips:")
         output.info("  1. Use --bench-path to specify the bench directory explicitly")
-        output.info("  2. If using Frappe Manager, run: fm bench list")
-        output.info("  3. Navigate to the bench directory and run the command from there")
+        output.info("  2. If using Frappe Manager, the tool will try to find bench from site name")
+        output.info("  3. Run: fm list to see available sites")
+        output.info("  4. Navigate to the bench directory and run the command from there")
         output.info("")
         output.info("Example:")
-        output.info("  ai-translate --bench-path /path/to/bench --apps frappe --lang ar --site site-name")
+        output.info("  ai-translate erpnext --lang ar --site site-name")
+        output.info("  ai-translate --bench-path /path/to/bench erpnext --lang ar --site site-name")
         sys.exit(1)
 
     output.info(f"Bench path: {bench_manager.bench_path}")
@@ -181,7 +178,7 @@ def translate(
             if decision.value == "translate":
                 # Check if already translated
                 existing = storage.get(extracted.text, extracted.context)
-                if not existing or update_existing:
+                if not existing:  # Only translate if not already translated
                     to_translate.append(extracted)
 
         total_to_translate = len(to_translate)
@@ -199,7 +196,8 @@ def translate(
             "rejected": 0,
         }
         
-        if not dry_run:
+        # Always run translation
+        if True:
             consecutive_failures = 0
             max_consecutive_failures = 5  # Stop after 5 consecutive failures
             
@@ -296,8 +294,7 @@ def translate(
     
     console.print("\n[bold green]═══════════════════════════════════════════════════════════[/bold green]\n")
 
-    if dry_run:
-        output.info("Dry run complete - no changes made")
+    # Translation complete
 
 
 @app.command(name="list-benches")
