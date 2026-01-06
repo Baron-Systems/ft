@@ -754,6 +754,17 @@ def _translate_impl(
                     )
 
                     for extracted, (translated, trans_status) in zip(batch_items, results):
+                        # If batch result is rejected/failed, retry individually. This significantly improves
+                        # success rate on complex strings (placeholders / quotes / mixed punctuation).
+                        if trans_status in ("rejected", "failed"):
+                            r_tr, r_st = translator.translate(
+                                extracted.text,
+                                lang,
+                                source_lang="en",
+                                context=context,
+                            )
+                            if r_st == "ok" and r_tr:
+                                translated, trans_status = r_tr, r_st
                         if trans_status == "ok" and translated:
                             translation_stats["translated"] += 1
                             storage.set(

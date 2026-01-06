@@ -161,26 +161,25 @@ class DBExtractor:
             
             # Initialize Frappe if not already initialized
             if not frappe.db:
-                # Try to find bench path from environment or current directory
-                bench_path = os.getenv("FRAPPE_BENCH_PATH")
-                if not bench_path:
-                    # Try to find from current directory
-                    cwd = os.getcwd()
-                    if "frappe-bench" in cwd or "sites" in cwd:
-                        # Navigate to bench root
-                        parts = cwd.split("frappe-bench")
-                        if parts:
-                            bench_path = parts[0] + "frappe-bench"
-                        else:
-                            parts = cwd.split("sites")
-                            if parts:
-                                bench_path = parts[0]
-                
-                if bench_path:
-                    os.chdir(bench_path)
-                
-                frappe.init(site=site)
-                frappe.connect(site=site)
+                # Prefer the explicitly provided bench_path when running from pipx/global python.
+                # Frappe needs sites_path to find site config/db.
+                if self.bench_path:
+                    try:
+                        os.chdir(str(self.bench_path))
+                    except Exception:
+                        pass
+                    frappe.init(site=site, sites_path=str(self.bench_path / "sites"))
+                    frappe.connect(site=site)
+                else:
+                    # Fallback: try environment/current directory heuristics
+                    bench_path = os.getenv("FRAPPE_BENCH_PATH")
+                    if bench_path:
+                        try:
+                            os.chdir(bench_path)
+                        except Exception:
+                            pass
+                        frappe.init(site=site)
+                        frappe.connect(site=site)
             
             self._frappe_initialized = True
         except ImportError:

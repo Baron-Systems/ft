@@ -141,7 +141,15 @@ class GettextSync:
             return True
 
         try:
-            # Use msgfmt to compile MO
+            # Prefer polib (pure python) when available to avoid relying on system msgfmt.
+            if POLIB_AVAILABLE:
+                po = polib.pofile(str(self.po_path))  # type: ignore
+                self.mo_path.parent.mkdir(parents=True, exist_ok=True)
+                po.save_as_mofile(str(self.mo_path))  # type: ignore
+                self.output.success(f"Compiled MO: {self.mo_path}")
+                return True
+
+            # Fallback to system msgfmt
             result = subprocess.run(
                 ["msgfmt", "-o", str(self.mo_path), str(self.po_path)],
                 capture_output=True,
@@ -157,9 +165,7 @@ class GettextSync:
             return True
 
         except FileNotFoundError:
-            self.output.warning(
-                "msgfmt not found. Install gettext tools to compile MO files."
-            )
+            self.output.warning("msgfmt not found. Install gettext tools to compile MO files.")
             return False
         except Exception as e:
             self.output.error(f"Failed to compile MO: {e}")

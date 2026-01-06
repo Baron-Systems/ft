@@ -416,7 +416,12 @@ class BenchManager:
         if not self.bench_path:
             return False
 
-        cmd = ["bench", "--site", site] if site else ["bench"]
+        # In many deployments (especially Frappe Manager / pipx), `bench` is not on PATH.
+        # Prefer the bench executable inside the bench virtualenv if present.
+        bench_bin = self.bench_path / "env" / "bin" / "bench"
+        bench_exe = str(bench_bin) if bench_bin.exists() else "bench"
+
+        cmd = [bench_exe, "--site", site] if site else [bench_exe]
         cmd.extend(command)
 
         try:
