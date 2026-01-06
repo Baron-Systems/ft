@@ -65,7 +65,7 @@ class TestTranslationStorage:
             assert all_entries[0].source_text in ("Hello", "World")
 
     def test_headerless_csv_is_loaded_and_preserved(self):
-        """Frappe/ERPNext translation CSVs are often headerless: ensure we don't wipe them."""
+        """Headerless CSVs should be readable; on save we normalize to include the header."""
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
             translations_dir = base / "translations"
@@ -90,8 +90,30 @@ class TestTranslationStorage:
             assert storage2.get("World") == "عالم"
             assert storage2.get("New") == "جديد"
 
-            # Ensure file remained headerless (no "source_text,translated_text" header inserted)
+            # Ensure header is present in normalized output.
             content = csv_path.read_text(encoding="utf-8").splitlines()
             assert content
-            assert not content[0].lower().startswith("source_text")
+            assert content[0].strip() == "Source,Translation"
+
+    def test_header_csv_is_loaded_but_saved_headerless(self):
+        """If a header CSV exists, we can read it, and we keep the header in output."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            translations_dir = base / "translations"
+            translations_dir.mkdir(parents=True, exist_ok=True)
+            csv_path = translations_dir / "ar.csv"
+
+            csv_path.write_text("source_text,translated_text\nHello,مرحبا\n", encoding="utf-8")
+
+            storage = TranslationStorage(storage_path=base, lang="ar")
+            assert storage.get("Hello") == "مرحبا"
+
+            context = TranslationContext(layer="A", app="test")
+            storage.set("World", "عالم", context, update_existing=False)
+            storage.save()
+
+            # After save, file should have Frappe header.
+            lines = csv_path.read_text(encoding="utf-8").splitlines()
+            assert lines
+            assert lines[0].strip() == "Source,Translation"
 

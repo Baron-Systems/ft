@@ -46,8 +46,8 @@ class TranslationStorage:
         
         self.csv_path.parent.mkdir(parents=True, exist_ok=True)
         self._cache: Dict[str, TranslationEntry] = {}
-        # Frappe translation CSVs are often headerless (two columns). Track what we detected so we can
-        # write back in a compatible format.
+        # Frappe translation CSVs are two columns (Source/Translation). Some files include a header
+        # row (often: Source,Translation) and some do not. We support reading both styles.
         self._csv_has_header: Optional[bool] = None
         self._load_cache()
 
@@ -228,26 +228,20 @@ class TranslationStorage:
         self._cache[key] = entry
 
     def save(self):
-        """Save all translations to CSV without deleting existing entries."""
-        # If we haven't detected header style yet (e.g., file didn't exist on init), default to
-        # headerless CSV for maximum Frappe compatibility.
-        if self._csv_has_header is None:
-            self._csv_has_header = False
+        """Save all translations to CSV without deleting existing entries.
+
+        Frappe translation CSV is a two-column dictionary: Source -> Translation.
+        We write the header row as: Source,Translation (Frappe docs style).
+        """
 
         # Sort by source_text for consistent output
         entries = sorted(self._cache.values(), key=lambda e: (e.source_text or "").lower())
 
         with open(self.csv_path, "w", encoding="utf-8", newline="") as f:
-            if self._csv_has_header:
-                fieldnames = ["source_text", "translated_text"]
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                for e in entries:
-                    writer.writerow({"source_text": e.source_text, "translated_text": e.translated_text})
-            else:
-                writer = csv.writer(f)
-                for e in entries:
-                    writer.writerow([e.source_text, e.translated_text])
+            writer = csv.writer(f)
+            writer.writerow(["Source", "Translation"])
+            for e in entries:
+                writer.writerow([e.source_text, e.translated_text])
 
     def _normalize_text(self, text: str) -> str:
         """Normalize text for deduplication."""
