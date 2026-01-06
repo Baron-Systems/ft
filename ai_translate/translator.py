@@ -35,6 +35,14 @@ class Translator:
 
         self.client = Groq(api_key=self.api_key)
         self.policy = PolicyEngine()
+        # Use a supported model (llama-3.1-70b-versatile was decommissioned)
+        # Try models in order of preference
+        self.models = [
+            "llama-3.3-70b-versatile",  # Latest versatile model
+            "llama-3.1-8b-instant",     # Fast alternative
+            "mixtral-8x7b-32768",        # Alternative model
+        ]
+        self.current_model_index = 0
         self.stats = {
             "translated": 0,
             "failed": 0,
@@ -79,38 +87,67 @@ class Translator:
         # Prepare prompt
         prompt = self._build_prompt(text, target_lang, source_lang, context)
 
-        try:
-            # Call Groq API
-            response = self.client.chat.completions.create(
-                model="llama-3.1-70b-versatile",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a professional translator. Translate accurately while preserving placeholders, formatting, and technical terms.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.3,
-                max_tokens=1000,
-            )
-
-            translated = response.choices[0].message.content.strip()
-
-            # Validate placeholders
-            if not self.policy.validate_placeholders(text, translated):
-                self.stats["rejected"] += 1
-                self.output.warning(
-                    f"Placeholder mismatch: '{text}' -> '{translated}'"
+        # Try models in order until one works
+        last_error = None
+        for model_index in range(self.current_model_index, len(self.models)):
+            model = self.models[model_index]
+            try:
+                # Call Groq API
+                response = self.client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are a professional translator. Translate accurately while preserving placeholders, formatting, and technical terms.",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.3,
+                    max_tokens=1000,
                 )
-                return None, "rejected"
 
-            self.stats["translated"] += 1
-            return translated, "ok"
+                translated = response.choices[0].message.content.strip()
 
-        except Exception as e:
-            self.stats["failed"] += 1
-            self.output.error(f"Translation failed: {e}")
-            return None, "failed"
+                # Validate placeholders
+                if not self.policy.validate_placeholders(text, translated):
+                    self.stats["rejected"] += 1
+                    self.output.warning(
+                        f"Placeholder mismatch: '{text}' -> '{translated}'"
+                    )
+                    return None, "rejected"
+
+                # Success - update model index for future calls
+                self.current_model_index = model_index
+                self.stats["translated"] += 1
+                return translated, "ok"
+
+            except Exception as e:
+                last_error = e
+                error_str = str(e)
+                
+                # Check if model is decommissioned or invalid
+                if "decommissioned" in error_str.lower() or "invalid" in error_str.lower() or "not found" in error_str.lower():
+                    # Try next model
+                    if model_index < len(self.models) - 1:
+                        self.output.warning(f"Model {model} not available, trying next model...", verbose_only=True)
+                        continue
+                
+                # If it's a different error and we haven't tried all models, try next
+                if model_index < len(self.models) - 1:
+                    self.output.warning(f"Error with model {model}, trying next model...", verbose_only=True)
+                    continue
+                
+                # All models failed
+                break
+        
+        # All models failed
+        self.stats["failed"] += 1
+        error_msg = str(last_error) if last_error else "Unknown error"
+        # Only show error once per unique error message to avoid spam
+        if not hasattr(self, '_last_error') or self._last_error != error_msg:
+            self.output.error(f"Translation failed: {error_msg}")
+            self._last_error = error_msg
+        return None, "failed"
 
     def translate_batch(
         self,

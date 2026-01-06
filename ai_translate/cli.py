@@ -221,12 +221,17 @@ def translate(
 
     # Translate
     if not dry_run:
+        consecutive_failures = 0
+        max_consecutive_failures = 5  # Stop after 5 consecutive failures
+        
         with ProgressTracker(total=total_to_translate, description="Translating") as progress:
             for extracted in to_translate:
                 translated, status = translator.translate(
                     extracted.text, lang, source_lang="en"
                 )
+                
                 if status == "ok" and translated:
+                    consecutive_failures = 0  # Reset failure counter
                     storage.set(
                         extracted.text,
                         translated,
@@ -234,6 +239,13 @@ def translate(
                         extracted.source_file,
                         extracted.line_number,
                     )
+                elif status == "failed":
+                    consecutive_failures += 1
+                    if consecutive_failures >= max_consecutive_failures:
+                        output.error(f"Stopping translation after {max_consecutive_failures} consecutive failures")
+                        output.error("Please check your API key and model availability")
+                        break
+                
                 progress.update()
 
         # Save storage
